@@ -1,0 +1,29 @@
+{
+  "name": "denia-platform",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "cf:init": "vinext init",
+    "cf:build": "vinext build",
+    "deploy": "vinext deploy"
+  },
+  "dependencies": {
+    "@clerk/nextjs": "latest",
+    "framer-motion": "latest",
+    "lucide-react": "latest",
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "typescript": "latest",
+    "vinext": "latest",
+    "wrangler": "latest"
+  }
+}

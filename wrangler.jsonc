@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "denia-platform",
+  "compatibility_date": "2026-10-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "denia-saas",
+      "database_id": "COLOQUE_O_DATABASE_ID"
+    }
+  ]
+}
