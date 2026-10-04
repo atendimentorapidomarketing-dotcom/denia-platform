@@ -1,0 +1,31 @@
+DENIA PLATFORM V3 — PUBLICAÇÃO CLOUDFLARE
+
+Esta versão já foi ajustada para:
+Next.js App Router -> vinext -> Vite -> Cloudflare Workers.
+
+NA TELA "SET UP YOUR APPLICATION" DA CLOUDFLARE:
+
+Project name:
+denia-platform
+
+Build command:
+npm run build
+
+Deploy command:
+npx wrangler deploy
+
+Preview command:
+npx wrangler preview
+
+Root directory:
+/
+
+Enable Preview builds:
+Ligado
+
+IMPORTANTE:
+1. Primeiro atualize o repositório GitHub com esta V3.
+2. Depois volte à Cloudflare e use os comandos acima.
+3. Nesta primeira publicação NÃO configure D1, Meta, OpenAI ou Clerk.
+4. O objetivo desta etapa é colocar a Home pública no ar sem depender de secrets.
+5. Depois da Home online, configuraremos Clerk, D1, Meta Coexistence e DENIA Engine.
