@@ -35,8 +35,8 @@
 //       relatório diário. Nunca inicia conversa nova por conta própria.
 // ============================================================================
 
-const VERSAO = "30.0.0";
-const SCHEMA_VERSAO = "30.0.0-a";
+const VERSAO = "30.1.0";
+const SCHEMA_VERSAO = "30.1.0-a";
 const EMPRESA_ID = 1;
 const PHONE_ID_PADRAO = "473474732510163";
 const GRAPH = "v25.0";
@@ -51,6 +51,11 @@ const HISTORICO_LIMITE = 40;
 const HORA_INICIO_PRESTADOR = 8;
 const HORA_FIM_PRESTADOR = 21;
 const TEL_TESTE_CLIENTE = "0000000000000";
+
+// Travas contra rajadas: nenhuma situação (bug, loop, falha de banco) pode
+// fazer a DENIA mandar mensagens sem parar.
+const LIMITES_ENVIO = { porTelefone2min: 4, porTelefone10min: 10, porTelefoneHora: 25, global10min: 150 };
+const LIMITE_ALERTAS_HORA = 12;
 
 // ----------------------------------------------------------------------------
 // PRESTADORES — identificados por TELEFONE + ÁREA, nunca só pelo nome.
@@ -258,7 +263,10 @@ const SQL_SCHEMA = [
   `CREATE INDEX IF NOT EXISTS d30_agendados_status ON d30_agendados(status, criado_ms)`,
   `CREATE TABLE IF NOT EXISTS d30_treinamento (versao INTEGER PRIMARY KEY AUTOINCREMENT, json TEXT NOT NULL, autor TEXT, criado_ms INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS d30_eventos (id INTEGER PRIMARY KEY AUTOINCREMENT, caso_id INTEGER, tipo TEXT NOT NULL, descricao TEXT, dados TEXT, criado_ms INTEGER NOT NULL)`,
-  `CREATE INDEX IF NOT EXISTS d30_eventos_ms ON d30_eventos(criado_ms)`
+  `CREATE INDEX IF NOT EXISTS d30_eventos_ms ON d30_eventos(criado_ms)`,
+  `CREATE TABLE IF NOT EXISTS d30_saidas (id INTEGER PRIMARY KEY AUTOINCREMENT, telefone TEXT NOT NULL, criado_ms INTEGER NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS d30_saidas_tel ON d30_saidas(telefone, criado_ms)`,
+  `CREATE INDEX IF NOT EXISTS d30_saidas_ms ON d30_saidas(criado_ms)`
 ];
 const SQL_INDICES_LEGADO = [
   `CREATE INDEX IF NOT EXISTS d30_idx_msg_pessoa ON mensagens(empresa_id, pessoa_id, id)`,
@@ -572,10 +580,17 @@ async function telegramEnviar(env, texto) {
 function criarSaida(c) {
   const env = c.env;
   const simular = (canal, para, conteudo, extra = {}) => { c.registro.push({ canal, para, texto: conteudo, ...extra }); return { ok: true, id: "sim." + crypto.randomUUID() }; };
+  const controlado = async (to, envio) => {
+    const bloqueio = await verificarLimites(c, to);
+    if (bloqueio) { console.warn("Envio bloqueado:", bloqueio); return { ok: false, bloqueado: true, erro: bloqueio }; }
+    const r = await envio();
+    if (r.ok) await registrarSaidaTaxa(c, to);
+    return r;
+  };
   return {
-    texto: (to, t, info = {}) => c.sim ? simular("whatsapp", to, t, info) : metaTexto(env, to, t),
-    midia: (to, m, info = {}) => c.sim ? simular("whatsapp-midia", to, `[${m.tipo}] ${m.legenda || ""}`, info) : metaMidia(env, to, m.tipo, m.mediaId, m.legenda),
-    template: (to, nome, params, info = {}) => c.sim ? simular("whatsapp-template", to, `${nome}: ${params.join(" | ")}`, info) : metaTemplate(env, to, nome, params),
+    texto: (to, t, info = {}) => c.sim ? simular("whatsapp", to, t, info) : controlado(to, () => metaTexto(env, to, t)),
+    midia: (to, m, info = {}) => c.sim ? simular("whatsapp-midia", to, `[${m.tipo}] ${m.legenda || ""}`, info) : controlado(to, () => metaMidia(env, to, m.tipo, m.mediaId, m.legenda)),
+    template: (to, nome, params, info = {}) => c.sim ? simular("whatsapp-template", to, `${nome}: ${params.join(" | ")}`, info) : controlado(to, () => metaTemplate(env, to, nome, params)),
     telegram: async t => {
       if (c.sim) return simular("telegram", "equipe", t);
       if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) { console.warn("Telegram não configurado:", t.slice(0, 200)); return { ok: false, erro: "Telegram não configurado" }; }
@@ -584,9 +599,47 @@ function criarSaida(c) {
   };
 }
 
+// Pausa geral (botão de emergência do painel ou variável DENIA_PAUSADA=true).
+let cachePausaGeral = { em: 0, valor: false };
+async function pausaGeralAtiva(c) {
+  if (String(c.env.DENIA_PAUSADA || "").toLowerCase() === "true") return true;
+  if (c.contingencia) return false;
+  if (c.agora() - cachePausaGeral.em < 20000) return cachePausaGeral.valor;
+  const r = await c.db.prepare("SELECT valor FROM d30_meta WHERE chave='pausa_geral'").first().catch(() => null);
+  cachePausaGeral = { em: c.agora(), valor: r?.valor === "1" };
+  return cachePausaGeral.valor;
+}
+async function verificarLimites(c, to) {
+  if (await pausaGeralAtiva(c)) return "DENIA pausada (pausa geral ativa).";
+  if (c.contingencia) return null; // a contingência tem trava própria no KV
+  const tel = digitos(to), agora = c.agora();
+  const conta = async (sql, ...b) => Number((await c.db.prepare(sql).bind(...b).first())?.n || 0);
+  const desde = ms => agora - ms;
+  const n2 = await conta("SELECT COUNT(*) n FROM d30_saidas WHERE telefone=? AND criado_ms > ?", tel, desde(120000));
+  const n10 = await conta("SELECT COUNT(*) n FROM d30_saidas WHERE telefone=? AND criado_ms > ?", tel, desde(600000));
+  const n60 = await conta("SELECT COUNT(*) n FROM d30_saidas WHERE telefone=? AND criado_ms > ?", tel, desde(3600000));
+  const g10 = await conta("SELECT COUNT(*) n FROM d30_saidas WHERE criado_ms > ?", desde(600000));
+  let motivo = "";
+  if (g10 >= LIMITES_ENVIO.global10min) motivo = `limite geral: ${g10} mensagens em 10 min`;
+  else if (n2 >= LIMITES_ENVIO.porTelefone2min || n10 >= LIMITES_ENVIO.porTelefone10min || n60 >= LIMITES_ENVIO.porTelefoneHora) motivo = `limite por contato (${tel}): ${n2} em 2 min, ${n10} em 10 min, ${n60} em 1 h`;
+  if (!motivo) return null;
+  await alertarEquipe(c, `TRAVA DE SEGURANÇA: envios automáticos bloqueados — ${motivo}. Verifique a conversa; nada mais será enviado a esse contato até a contagem baixar.`, "limite:" + (g10 >= LIMITES_ENVIO.global10min ? "geral" : tel) + ":" + Math.floor(agora / 3600000));
+  return motivo;
+}
+async function registrarSaidaTaxa(c, to) {
+  if (c.contingencia) return;
+  try { await c.db.prepare("INSERT INTO d30_saidas(telefone,criado_ms) VALUES(?,?)").bind(digitos(to), c.agora()).run(); } catch (e) { console.warn("taxa", e?.message); }
+}
+
 async function alertarEquipe(c, texto, chave, casoId = null) {
   if (chave && !(await reservarChave(c, "alerta:" + chave))) return;
+  // Teto de alertas por hora: o Telegram nunca vira uma enxurrada.
+  const recentes = Number((await c.db.prepare("SELECT COUNT(*) n FROM d30_eventos WHERE tipo='ALERTA_EQUIPE' AND criado_ms > ?").bind(c.agora() - 3600000).first().catch(() => null))?.n || 0);
   await evento(c, casoId, "ALERTA_EQUIPE", texto);
+  if (recentes >= LIMITE_ALERTAS_HORA) {
+    if (await reservarChave(c, "alerta-teto:" + Math.floor(c.agora() / 3600000))) await c.saida.telegram(`DENIA — Muitos alertas nesta hora (${recentes}). Os próximos ficam só no registro; veja /api/saude.`);
+    return;
+  }
   const r = await c.saida.telegram("DENIA — " + texto);
   if (!r.ok) console.warn("Alerta não entregue:", r.erro);
 }
@@ -795,8 +848,32 @@ async function descreverVideo(c, m) {
 const ETAPAS_COM_PRESTADOR = new Set(["AGUARDANDO_PRESTADOR", "AGUARDANDO_CLIENTE", "AGUARDANDO_ENDERECO", "AGUARDANDO_CONFIRMACAO_PRESTADOR", "AGENDADO"]);
 const ETAPAS_COM_RESPOSTA_PRESTADOR = new Set(["AGUARDANDO_CLIENTE", "AGUARDANDO_ENDERECO", "AGUARDANDO_CONFIRMACAO_PRESTADOR", "AGENDADO"]);
 
+// Assuntos de uma pergunta (para nunca perguntar a mesma coisa duas vezes).
+function camposDaPergunta(frase) {
+  const n = norm(frase);
+  if (!/\?/.test(frase)) return [];
+  const c = [];
+  if (/\b(bairro|regiao|localizacao|em que local|qual local|onde (fica|sera|e o atendimento|voce mora))\b/.test(n)) c.push("bairro");
+  if (/\bendereco\b/.test(n)) c.push("endereco");
+  if (/(qual|que)\s+(e\s+o\s+)?(servico|tipo de servico)|o que (voce )?(precisa|deseja)\b/.test(n)) c.push("servico");
+  if (/\b(seu nome|como (voce )?se chama)\b/.test(n)) c.push("nome");
+  if (/\b(marca|modelo)\b/.test(n)) c.push("modelo");
+  if (/\b(foto|fotos|video|imagem)\b/.test(n)) c.push("foto");
+  if (/\b(dia|horario|data)\b/.test(n)) c.push("horario");
+  return c;
+}
+function perguntasRecentes(hist, limite = 8) {
+  const feitas = new Set();
+  const saidas = hist.filter(m => String(m.direcao).toUpperCase() === "SAIDA" && String(m.origem).toUpperCase() !== "HUMANO").slice(-limite);
+  for (const m of saidas) for (const f of String(m.conteudo || "").match(/[^.!?]+[.!?]*/g) || []) for (const k of camposDaPergunta(f)) feitas.add(k);
+  // Bairro: no máximo uma vez em toda a conversa recente.
+  for (const m of hist.filter(m => String(m.direcao).toUpperCase() === "SAIDA").slice(-30)) if (camposDaPergunta(m.conteudo || "").includes("bairro")) feitas.add("bairro");
+  return feitas;
+}
+
 function fraseProibida(frase, g) {
   const n = norm(frase);
+  for (const k of camposDaPergunta(frase)) if (g.perguntadas?.has(k)) return "pergunta já feita: " + k;
   for (const v of valoresMonetarios(frase)) if (!g.autorizados.has(v)) return "valor não autorizado";
   if (/\b(cpf|rg|cnpj)\b/.test(n) || /\d{3}\.\d{3}\.\d{3}-\d{2}/.test(frase)) return "documento pessoal";
   if (/(\+?55[\s-]?)?\(?\d{2}\)?[\s-]?9?\d{4}[\s-]?\d{4}\b/.test(frase)) return "telefone";
@@ -866,14 +943,14 @@ SEU PAPEL: você interpreta as mensagens e redige a resposta. Você NÃO executa
 - Nunca diga que enviou, consultou, falou, avisou, repassou, agendou, confirmou ou cancelou algo, a menos que o ESTADO DO CASO diga que isso já aconteceu.
 - Nunca invente preço, prazo, disponibilidade, diagnóstico, cobertura de região ou que um profissional faz certo serviço. Valores: somente os listados em VALORES AUTORIZADOS.
 - Nunca peça ao cliente para escolher profissional. Nunca informe telefone, CPF ou dados de profissionais ou de outras pessoas. Não peça CPF.
-- Bairro NÃO define preço: nunca diga que precisa do bairro para orçamento. Só pergunte bairro se o serviço é em domicílio, o cliente quer visita/atendimento e o bairro ainda não foi informado.
+- Bairro NÃO define preço: nunca diga que precisa do bairro para orçamento. Não pergunte bairro por iniciativa própria; o sistema e o profissional pedem quando for necessário. Nunca repita uma pergunta que você já fez nesta conversa, mesmo que o cliente não tenha respondido: siga em frente com o que ele disse.
 - Serviços de BALCÃO: o cliente leva o equipamento à loja; nunca pergunte bairro ou endereço.
 - Cancelamentos e reclamações: não decida; seja cordial e marque precisa_humano.
 - Se não souber algo, não invente: diga "Um momento, por favor." e marque precisa_humano.
 
 MEMÓRIA: o HISTÓRICO pode conter mensagens de outros casos do mesmo cliente (marcadas com #número); use as do caso ativo e só fale de outro caso se o cliente se referir a ele. Leia o ESTADO DO CASO, os FATOS e o HISTÓRICO antes de responder. Nunca pergunte algo que já está nos fatos ou no histórico. A informação mais recente vale mais. Uma resposta curta normalmente responde à última pergunta feita. Mensagens do ATENDENTE HUMANO fazem parte da conversa: continue de onde ele parou, sem repetir o que já foi combinado. Se o caso está AGENDADO ou concluído, não recomece a coleta; só é pedido novo quando o cliente pede claramente outro serviço.
 
-ESTILO: português do Brasil; cordial, natural e objetivo; 1 ou 2 frases curtas; no máximo uma pergunta; retribua cumprimentos; não repita o nome do cliente, o bairro nem o que ele acabou de dizer; sem listas, sem markdown; nunca seco ou grosseiro; não mencione sistema, banco de dados ou modelo de IA. Se perguntarem quem é você: "Sou a assistente virtual responsável pelo atendimento digital."
+ESTILO: português do Brasil; atendente experiente, cordial, natural e objetivo; responda primeiro ao que o cliente perguntou; 1 ou 2 frases curtas; no máximo uma pergunta; retribua cumprimentos; não repita o nome do cliente, o bairro nem o que ele acabou de dizer; sem listas, sem markdown; nunca seco ou grosseiro; não mencione sistema, banco de dados ou modelo de IA. Se perguntarem quem é você: "Sou a assistente virtual responsável pelo atendimento digital."
 
 COMO O SISTEMA AGE: quando o serviço está claro e o cliente quer orçamento, visita ou atendimento, o sistema consulta sozinho o profissional da categoria e avisa o cliente. Para isso basta preencher os fatos, quer_orcamento_ou_atendimento=true e pronto_para_profissional=true. Não é preciso bairro nem endereço para consultar.
 
@@ -962,6 +1039,17 @@ function normalizarDecisaoCliente(o) {
   };
 }
 
+// "Botafogo" logo depois de "Qual o bairro?" é o bairro, mesmo que a IA não tenha anotado.
+function capturarRespostaCurta(d, msgs, hist) {
+  const ultima = [...hist].reverse().find(m => String(m.direcao).toUpperCase() === "SAIDA");
+  if (!ultima) return;
+  const texto = msgs.map(m => m.conteudo).join(" ").trim();
+  if (!texto || texto.length > 160 || /\?/.test(texto) || ehMensagemSocial(texto) || msgs.some(m => m.mediaId)) return;
+  const campos = camposDaPergunta(String(ultima.conteudo || "").split(/(?<=[.!?])\s+/).filter(f => /\?/.test(f)).pop() || "");
+  const mapa = { bairro: "bairro", endereco: "endereco", nome: "nome", modelo: "modelo" };
+  for (const k of campos) if (mapa[k] && !d.fatos[mapa[k]] && (k !== "bairro" || texto.length <= 60)) d.fatos[mapa[k]] = texto;
+}
+
 async function autorizadosParaCaso(c, consulta) {
   const treino = await carregarTreinamento(c);
   const s = new Set(valoresMonetarios(treino.dados?.precos || ""));
@@ -1004,6 +1092,7 @@ async function processarCliente(c, tel, id, msgs, { apenasRegistrar, chaveLote }
   try {
     const bruto = await openaiJSON(c, INSTRUCOES_CLIENTE, montarEntradaCliente({ agora: c.agora(), treinamento, caso, consulta, autorizados, recentes, hist: formatarHistorico(hist, "CLIENTE", novasIds), novas, temAnexos: anexos.length > 0, pessoa }), anexos);
     d = normalizarDecisaoCliente(bruto);
+    capturarRespostaCurta(d, msgs, hist);
   } catch (e) {
     console.error("OpenAI cliente:", e?.message);
     await enviarAoCliente(c, { tel, pessoaId: pessoa.id, casoId: caso?.casoId, texto: "Um momento, por favor.", chave: chaveLote });
@@ -1045,7 +1134,7 @@ async function processarCliente(c, tel, id, msgs, { apenasRegistrar, chaveLote }
   const acao = await decidirCliente(c, { tel, pessoa, caso, consulta, d, chaveLote });
   let texto = acao.texto;
   if (!acao.fixa) {
-    const g = { etapa: caso?.etapa || "SEM_CASO", autorizados, modo: CATEGORIAS[caso?.fatos?.categoria]?.modo || "", regiaoConfirmada: caso?.fatos?.regiao_confirmada === "SIM", fatos: caso && !ETAPAS_ENCERRADAS.has(caso.etapa) ? caso.fatos : null, nome: pessoa.nome };
+    const g = { etapa: caso?.etapa || "SEM_CASO", autorizados, modo: CATEGORIAS[caso?.fatos?.categoria]?.modo || "", regiaoConfirmada: caso?.fatos?.regiao_confirmada === "SIM", fatos: caso && !ETAPAS_ENCERRADAS.has(caso.etapa) ? caso.fatos : null, nome: pessoa.nome, perguntadas: perguntasRecentes(hist) };
     const r = guardarResposta(d.resposta, g);
     if (r.removidas.length) await evento(c, caso?.casoId, "RESPOSTA_CORRIGIDA", r.removidas.join(" | "));
     texto = r.texto || respostaPadraoEtapa(caso?.etapa);
@@ -1502,7 +1591,7 @@ async function webhookPost(request, env, ctx) {
   try { await garantirSchema(c); }
   catch (e) {
     console.error("D1 indisponível:", e?.message);
-    for (const m of mensagens) ctx.waitUntil(contingencia(c, m).catch(x => console.error("contingência", x)));
+    for (const m of mensagens) ctx.waitUntil(contingencia(c, m, e?.message).catch(x => console.error("contingência", x)));
     for (const e2 of ecos) ctx.waitUntil(pausaKV(env, e2.para));
     return new Response("EVENT_RECEIVED", { status: 200 });
   }
@@ -1519,7 +1608,7 @@ async function webhookPost(request, env, ctx) {
       if (Number(r?.meta?.changes || 0) > 0) ultimos.set(m.de, m.wamid);
     } catch (e) {
       console.error("fila D1:", e?.message);
-      ctx.waitUntil(contingencia(c, m).catch(x => console.error("contingência", x)));
+      ctx.waitUntil(contingencia(criarContexto(env), m, e?.message).catch(x => console.error("contingência", x)));
     }
   }
   for (const [tel, wamid] of ultimos) ctx.waitUntil(agruparEProcessar(c, tel, wamid).catch(x => console.error("agrupar", x)));
@@ -1534,32 +1623,74 @@ async function pausaKV(env, tel) {
   if (!env.MEMORIA) return;
   try { await env.MEMORIA.put("d30:pausa:" + digitos(tel), "1", { expirationTtl: Math.ceil(PAUSA_HUMANA_MS / 1000) }); } catch { }
 }
-async function contingencia(c, m) {
-  const env = c.env;
-  const tel = m.de;
-  if (prestadorPorTelefone(tel)) { await c.saida.telegram(`DENIA (D1 indisponível) — mensagem do prestador ${tel}: "${txt(m.texto, 300)}". Tratar manualmente.`); return; }
+let ultimoAlertaContingencia = 0;
+async function kvGet(env, k) { try { return await env.MEMORIA.get(k); } catch { return null; } }
+async function kvPut(env, k, v, ttl) { try { await env.MEMORIA.put(k, v, ttl ? { expirationTtl: Math.max(60, ttl) } : undefined); return true; } catch { return false; } }
+
+// Um único aviso por hora, e não um por mensagem.
+async function avisarContingencia(c, motivo) {
+  const hora = Math.floor(c.agora() / 3600000);
+  if (ultimoAlertaContingencia === hora) return;
+  ultimoAlertaContingencia = hora;
+  if (c.env.MEMORIA) {
+    if (await kvGet(c.env, "d30:alerta-d1:" + hora)) return;
+    await kvPut(c.env, "d30:alerta-d1:" + hora, "1", 3700);
+  }
+  await c.saida.telegram(`DENIA — MODO DE CONTINGÊNCIA: o banco D1 não está respondendo (${txt(motivo, 160)}). A DENIA responde só o essencial aos clientes, no máximo 1 mensagem a cada 2 minutos por contato, sem consultar prestadores. Mensagens de prestadores e da equipe NÃO são respondidas — acompanhe pelo app. Este aviso se repete no máximo 1 vez por hora.`);
+}
+
+async function contingencia(c, m, motivo = "") {
+  c.contingencia = true;
+  const env = c.env, tel = digitos(m.de);
+  await avisarContingencia(c, motivo);
   if (!env.MEMORIA) return;
-  if (await env.MEMORIA.get("d30:pausa:" + digitos(tel)).catch(() => null)) return;
-  const snap = JSON.parse(await env.MEMORIA.get("d30:snap:" + digitos(tel)).catch(() => null) || "null");
-  const histKey = "d30:hist:" + digitos(tel);
-  const hist = JSON.parse(await env.MEMORIA.get(histKey).catch(() => null) || "[]");
+  const ts = Number(m.ts) * 1000;
+  if (ts && c.agora() - ts > FILA_EXPIRA_MS) return;                 // mensagem atrasada: não responder
+  if (prestadorPorTelefone(tel)) return;                                // prestador: só a equipe responde
+  const equipe = String(env.EQUIPE_TELEFONES || "").split(/[,;\s]+/).map(digitos).filter(Boolean);
+  const equipeKV = JSON.parse(await kvGet(env, "d30:equipe") || "[]");
+  if ([...equipe, ...equipeKV].some(t => variantesTel(t).includes(tel))) return; // equipe/técnico do D1
+  if (await kvGet(env, "d30:pausa:" + tel)) return;                    // atendente humano na conversa
+
+  // Agrupa mensagens seguidas: só a última da sequência responde.
+  const chaveUlt = "d30:cont:ult:" + tel;
+  const anterior = JSON.parse(await kvGet(env, chaveUlt) || "null");
+  const textos = anterior && c.agora() - anterior.em < 120000 ? anterior.textos.slice(-6) : [];
   let conteudo = txt(m.texto, 3000);
   if (m.tipo === "audio" && m.mediaId) { try { const a = await metaBaixarMidia(env, m.mediaId); conteudo = "[Áudio transcrito] " + await transcreverAudio(c, a.buffer, a.mime); } catch { conteudo = "[Áudio recebido]"; } }
   if (!conteudo) conteudo = `[${m.tipo} recebido]`;
-  hist.push({ a: "CLIENTE", t: conteudo });
-  let resposta = "Um momento, por favor.";
+  textos.push(conteudo);
+  if (!(await kvPut(env, chaveUlt, JSON.stringify({ wamid: m.wamid, textos, em: c.agora() }), 300))) return; // sem registro, sem resposta
+  await sleep(janela(env));
+  const ult = JSON.parse(await kvGet(env, chaveUlt) || "null");
+  if (ult && ult.wamid !== m.wamid) return;
+
+  // Trava: no máximo 1 resposta a cada 2 minutos por contato.
+  const chaveTrava = "d30:cont:resp:" + tel;
+  if (await kvGet(env, chaveTrava)) return;
+  if (!(await kvPut(env, chaveTrava, "1", 120))) return;
+
+  const histKey = "d30:hist:" + tel;
+  const hist = JSON.parse(await kvGet(env, histKey) || "[]");
+  for (const t of textos) hist.push({ a: "CLIENTE", t });
+  const snap = JSON.parse(await kvGet(env, "d30:snap:" + tel) || "null");
+  const histFormatoD1 = hist.map(x => ({ direcao: x.a === "DENIA" ? "SAIDA" : "ENTRADA", origem: "IA", conteudo: x.t }));
+  const ultimaDenia = [...hist].reverse().find(x => x.a === "DENIA")?.t || "";
+  let resposta = "";
   try {
     const treino = await carregarTreinamento(c);
     const caso = snap ? { casoId: snap.casoId, etapa: snap.etapa, fatos: snap.fatos || {}, resumo: snap.resumo } : null;
-    const d = normalizarDecisaoCliente(await openaiJSON(c, INSTRUCOES_CLIENTE, montarEntradaCliente({ treinamento: treino, caso, consulta: null, autorizados: new Set(), recentes: [], hist: hist.slice(-20, -1).map(x => `${x.a}: ${x.t}`).join("\n") || "(sem histórico disponível)", novas: "- " + conteudo, temAnexos: false, pessoa: { nome: m.nome } })));
-    const acaoNecessaria = d.intencao === "ACEITA_PROPOSTA" || d.intencao === "PEDE_CANCELAMENTO" || d.intencao === "PEDE_ALTERACAO" || (d.quer && d.pronto) || d.precisa_humano || d.intencao === "FALAR_COM_HUMANO";
-    const g = guardarResposta(d.resposta, { etapa: caso?.etapa || "SEM_CASO", autorizados: new Set(), modo: "", regiaoConfirmada: false });
-    resposta = acaoNecessaria ? "Um momento, por favor." : (g.texto || "Um momento, por favor.");
-    if (acaoNecessaria) await c.saida.telegram(`DENIA (D1 indisponível) — ${m.nome || tel} precisa de ação manual: "${txt(conteudo, 300)}"`);
-  } catch (e) { await c.saida.telegram(`DENIA (D1 e IA com falha) — ${m.nome || tel}: "${txt(conteudo, 300)}"`); }
+    const d = normalizarDecisaoCliente(await openaiJSON(c, INSTRUCOES_CLIENTE, montarEntradaCliente({ agora: c.agora(), treinamento: treino, caso, consulta: null, autorizados: new Set(), recentes: [], hist: hist.slice(-24, -textos.length).map(x => `${x.a}: ${x.t}`).join("\n") || "(sem histórico disponível)", novas: textos.map(t => "- " + t).join("\n"), temAnexos: false, pessoa: { nome: m.nome } })));
+    const acaoNecessaria = ["ACEITA_PROPOSTA", "PEDE_CANCELAMENTO", "PEDE_ALTERACAO", "FALAR_COM_HUMANO", "PEDE_OUTRO_HORARIO"].includes(d.intencao) || (d.quer && d.pronto) || d.precisa_humano;
+    const g = guardarResposta(d.resposta, { etapa: caso?.etapa || "SEM_CASO", autorizados: new Set(), modo: "", regiaoConfirmada: false, fatos: caso?.fatos || null, perguntadas: perguntasRecentes(histFormatoD1, 12) });
+    resposta = acaoNecessaria ? "Recebemos sua mensagem. Um atendente vai dar continuidade em instantes." : g.texto;
+  } catch (e) {
+    resposta = "Recebemos sua mensagem. Um atendente vai dar continuidade em instantes.";
+  }
+  if (!resposta || norm(resposta) === norm(ultimaDenia)) return; // nada útil ou repetido: silêncio
   const r = await c.saida.texto(tel, resposta);
   if (r.ok) hist.push({ a: "DENIA", t: resposta });
-  await env.MEMORIA.put(histKey, JSON.stringify(hist.slice(-30)), { expirationTtl: 60 * 60 * 24 * 7 }).catch(() => { });
+  await kvPut(env, histKey, JSON.stringify(hist.slice(-30)), 60 * 60 * 24 * 7);
 }
 
 // ============================================================================
@@ -1578,6 +1709,13 @@ async function cron(c) {
   const dia = dataSP(agora);
   if (await reservarChave(c, "limpeza:" + dia)) {
     await c.db.prepare("DELETE FROM d30_fila WHERE recebido_ms < ?").bind(agora - 7 * 86400000).run();
+    await c.db.prepare("DELETE FROM d30_saidas WHERE criado_ms < ?").bind(agora - 2 * 86400000).run();
+    // Telefones da equipe e técnicos do D1, para a contingência nunca respondê-los.
+    if (c.env.MEMORIA) {
+      const eq = (await c.db.prepare(`SELECT DISTINCT p.telefone FROM pessoas p WHERE p.empresa_id=? AND (UPPER(COALESCE(p.tipo,'')) IN ('ATENDENTE','TECNICO')
+        OR p.id IN (SELECT pessoa_id FROM atendentes WHERE COALESCE(ativo,1)=1) OR p.id IN (SELECT pessoa_id FROM tecnicos WHERE COALESCE(ativo,1)=1))`).bind(EMPRESA_ID).all().catch(() => ({ results: [] })))?.results || [];
+      await kvPut(c.env, "d30:equipe", JSON.stringify(eq.map(x => digitos(x.telefone)).filter(Boolean)), 60 * 60 * 24 * 30);
+    }
     await c.db.prepare("DELETE FROM d30_envios WHERE criado_ms < ? AND chave NOT LIKE 'limpeza:%' AND chave NOT LIKE 'relatorio:%'").bind(agora - 45 * 86400000).run();
   }
 }
@@ -1674,7 +1812,7 @@ async function platformApi(request, env, caminho, metodo) {
   if (caminho === "/platform/conversations" && metodo === "GET") {
     const lim = Math.min(Math.max(Number(new URL(request.url).searchParams.get("limit")) || 100, 1), 250);
     const r = await c.db.prepare(`SELECT p.id pessoa_id, p.nome, p.telefone, p.tipo, m.conteudo ultima_mensagem, m.criado_em ultima_mensagem_em, m.direcao ultima_direcao, m.origem ultima_origem
-      FROM (SELECT pessoa_id, MAX(id) mid FROM mensagens WHERE empresa_id=? AND id > (SELECT COALESCE(MAX(id),0) FROM mensagens) - 5000 GROUP BY pessoa_id) u
+      FROM (SELECT pessoa_id, MAX(id) mid FROM mensagens WHERE empresa_id=? AND id > (SELECT COALESCE(MAX(id),0) FROM mensagens) - 1500 GROUP BY pessoa_id) u
       JOIN mensagens m ON m.id=u.mid JOIN pessoas p ON p.id=u.pessoa_id ORDER BY u.mid DESC LIMIT ?`).bind(EMPRESA_ID, lim).all();
     const conversas = [];
     for (const x of r?.results || []) conversas.push({ ...x, ia_pausada: await estaPausado(c, x.telefone) });
@@ -1746,6 +1884,8 @@ async function saude(c) {
       r.agendados_8h = Number((await c.db.prepare("SELECT COUNT(*) n FROM d30_agendados WHERE status='PENDENTE'").first())?.n || 0);
     } catch (e) { r.erro_estatisticas = txt(e?.message, 200); }
   }
+  r.pausa_geral = await pausaGeralAtiva(c).catch(() => null);
+  r.limites_envio = LIMITES_ENVIO;
   r.ok = r.d1.operacional && r.openai_configurado && r.whatsapp_configurado;
   return r;
 }
@@ -1784,6 +1924,8 @@ function paginaTeste() {
 <label style="flex:0 0 auto;font-size:13px"><input type="checkbox" id="hora" checked style="width:auto"> ignorar horário 8h–21h</label></div>
 <div class="linha" style="margin-top:8px"><textarea id="msg" placeholder="Digite a mensagem..." style="min-height:60px"></textarea></div>
 <div class="linha" style="margin-top:8px"><button id="env">Enviar</button><button class="sec" id="limpar">Limpar teste</button></div></div>
+<div class="card"><b>Emergência</b><br><small>Para todos os envios automáticos reais (clientes e prestadores). As mensagens continuam sendo registradas.</small>
+<div class="linha" style="margin-top:8px"><button id="pausar" style="background:#b91c1c">PAUSAR DENIA</button><button class="sec" id="retomar">Reativar DENIA</button><span id="pst"></span></div></div>
 <script>
 const log=document.getElementById('log');
 function add(cls,rot,t){const d=document.createElement('div');d.className='b '+cls;d.innerHTML='<span class="rot"></span>';d.firstChild.textContent=rot;d.appendChild(document.createTextNode(t));log.appendChild(d);log.scrollTop=log.scrollHeight;}
@@ -1794,6 +1936,8 @@ for(const s of d.saidas||[]){const cls=s.canal==='telegram'?'tel':(s.papel==='pr
 if(!(d.saidas||[]).length&&!d.erro)add('cli','(DENIA não respondeu)','—');}
 env.onclick=enviar;msg.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();enviar();}});
 limpar.onclick=async()=>{await fetch('/api/limpar-teste',{method:'POST'});log.innerHTML='';};
+async function pausa(ativa){const r=await fetch('/api/pausa-geral',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ativa})});const d=await r.json();pst.textContent=d.pausa_geral?'DENIA PAUSADA':'DENIA ativa';}
+pausar.onclick=()=>pausa(true);retomar.onclick=()=>pausa(false);
 </script></main></body></html>`;
 }
 
@@ -1872,6 +2016,14 @@ async function rotear(request, env, ctx) {
   if (caminho === "/api/saude") { const s = await saude(c); return json(s, s.ok ? 200 : 503); }
   if (caminho === "/api/teste" && metodo === "POST") return apiTeste(request, env);
   if (caminho === "/api/limpar-teste" && metodo === "POST") return limparTeste(env);
+  if (caminho === "/api/pausa-geral" && metodo === "POST") {
+    await garantirSchema(c);
+    const ativa = (await request.json().catch(() => ({})))?.ativa === true;
+    await c.db.prepare("INSERT OR REPLACE INTO d30_meta(chave,valor) VALUES('pausa_geral',?)").bind(ativa ? "1" : "0").run();
+    cachePausaGeral = { em: 0, valor: false };
+    await evento(c, null, "PAUSA_GERAL", ativa ? "ativada" : "desativada");
+    return json({ pausa_geral: ativa });
+  }
   await garantirSchema(c);
   if (caminho === "/api/treinamento" && metodo === "GET") return json(await carregarTreinamento(c));
   if (caminho === "/api/treinamento" && metodo === "POST") {

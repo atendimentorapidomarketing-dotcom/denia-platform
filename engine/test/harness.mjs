@@ -25,9 +25,9 @@ export class D1Fake {
   q(sql, ...a) { return this.db.prepare(sql).all(...a).map(r => ({ ...r })); }
 }
 export class KVFake {
-  constructor() { this.m = new Map(); this.puts = 0; }
-  async get(k) { return this.m.has(k) ? this.m.get(k) : null; }
-  async put(k, v) { this.puts++; this.m.set(k, String(v)); }
+  constructor(relogio = () => Date.now()) { this.m = new Map(); this.puts = 0; this.relogio = relogio; }
+  async get(k) { const e = this.m.get(k); if (!e) return null; if (e.ate && this.relogio() > e.ate) { this.m.delete(k); return null; } return e.v; }
+  async put(k, v, op = {}) { this.puts++; this.m.set(k, { v: String(v), ate: op.expirationTtl ? this.relogio() + op.expirationTtl * 1000 : 0 }); }
   async delete(k) { this.m.delete(k); }
 }
 
@@ -35,9 +35,10 @@ export async function criarAmbiente({ inicio = "2026-10-07T14:00:00-03:00", env:
   const mod = await import(new URL("../worker.js?t=" + (++contadorModulo), import.meta.url).href);
   const worker = mod.default;
   const amb = {
-    agora: Date.parse(inicio), DB: new D1Fake(), KV: new KVFake(),
+    agora: Date.parse(inicio), DB: new D1Fake(), KV: null,
     enviados: [], telegram: [], llm: [], llmCliente: null, llmPrestador: null, metaFalha: null, contador: 0, transcricoes: {}
   };
+  amb.KV = new KVFake(() => amb.agora);
   amb.env = {
     DB: amb.DB, MEMORIA: amb.KV, OPENAI_API_KEY: "sk-test", WHATSAPP_TOKEN: "tok", WHATSAPP_VERIFY_TOKEN: "verify",
     PAINEL_SENHA: "senha-de-teste-123", TELEGRAM_BOT_TOKEN: "tg", TELEGRAM_CHAT_ID: "1", JANELA_AGRUPAMENTO_MS: "0",
@@ -77,7 +78,9 @@ export async function criarAmbiente({ inicio = "2026-10-07T14:00:00-03:00", env:
     while (pend.length) await pend.shift();
     return r;
   };
+  amb.passo = 40000; // cada mensagem chega 40 s depois da anterior, como numa conversa real
   amb.webhook = async (value, { headers = {}, assinar } = {}) => {
+    amb.agora += amb.passo;
     const body = JSON.stringify({ object: "whatsapp_business_account", entry: [{ changes: [{ field: value.message_echoes ? "smb_message_echoes" : "messages", value: { metadata: { phone_number_id: "473474732510163" }, ...value } }] }] });
     const h = { "content-type": "application/json", ...headers };
     if (assinar) h["x-hub-signature-256"] = "sha256=" + createHmac("sha256", assinar).update(body).digest("hex");

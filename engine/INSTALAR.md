@@ -1,4 +1,4 @@
-# DENIA Engine V30 — como instalar no Cloudflare
+# DENIA Engine V30.1 — como instalar no Cloudflare
 
 Arquivo para colar: `engine/worker.js` (um arquivo só, ~1.900 linhas).
 Funciona no **plano gratuito** da Cloudflare. Usa o mesmo D1 (`DB`) e o mesmo KV
@@ -25,6 +25,8 @@ Worker → **Settings → Variables and Secrets**. Mantenha os que já existem
 | `META_APP_SECRET` | Recomendado | "Chave secreta do app" (Meta for Developers → seu app → Configurações → Básico). Impede que alguém forje mensagens no webhook. |
 | `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID` | Recomendado | Alertas para a equipe e o aviso de "SERVIÇO AGENDADO". Sem eles, os alertas só aparecem no log. |
 | `WHATSAPP_TEMPLATE_CONSULTA_TECNICO` | Recomendado | Nome de um template aprovado pela Meta para falar com prestador que não escreveu nas últimas 24 h (ver Passo 7). |
+| `EQUIPE_TELEFONES` | Recomendado | Telefones da equipe, separados por vírgula (ex.: `5521999990000,5521988880000`). Se o D1 cair, esses números nunca recebem resposta automática. |
+| `DENIA_PAUSADA` | Emergência | Coloque `true` para parar todos os envios automáticos. Apague para voltar. |
 | `MARKUP_PERCENT` | Opcional | Acréscimo quando o prestador diz que o valor é "só a parte dele". Padrão: 50. |
 | `JANELA_AGRUPAMENTO_MS` | Opcional | Espera para juntar mensagens seguidas. Padrão 8000 (8 s), máximo 15000. |
 | `RELATORIO_GMAIL_URL`, `RELATORIO_GMAIL_SEGREDO`, `RELATORIO_EMAIL_TO` | Opcional | Relatório diário por e-mail, usando o mesmo Google Apps Script da versão anterior. Sem eles, o relatório vai só para o Telegram. |
@@ -34,6 +36,16 @@ Worker → **Settings → Variables and Secrets**. Mantenha os que já existem
 - **Settings → Bindings**: precisam existir `DB` (D1) e `MEMORIA` (KV). São os mesmos de hoje.
 - **Settings → Triggers → Cron Triggers**: precisa haver `* * * * *` (a cada minuto).
   Se já existir, não mexa. Se não existir, adicione.
+
+## Passo 3b — Garantir que só UM Worker atende o WhatsApp (importante)
+
+Se o Worker antigo continuar ativo, os DOIS respondem cada mensagem — o cliente recebe mensagens
+em dobro e o cron antigo continua consumindo a cota do D1.
+
+- Em **Workers & Pages**, veja se existe mais de um Worker de atendimento.
+- No painel da Meta (WhatsApp → Configuração → Webhook), a URL de retorno deve apontar para o
+  Worker onde você colou a V30.1.
+- No Worker antigo (se for outro), remova o **Cron Trigger** ou apague o Worker.
 
 ## Passo 4 — Trocar o código (2 min)
 
@@ -74,6 +86,13 @@ Crie no WhatsApp Manager um template de categoria "Utilidade", com 5 variáveis,
 
 Depois de aprovado, coloque o nome dele em `WHATSAPP_TEMPLATE_CONSULTA_TECNICO`.
 
+## Emergência: parar a DENIA na hora
+
+- Painel `/chat` → **PAUSAR DENIA** (e **Reativar DENIA** para voltar). As mensagens continuam
+  chegando no app e sendo registradas; só os envios automáticos param.
+- Sem acesso ao painel: crie a variável `DENIA_PAUSADA` = `true`.
+- Último recurso: apague o secret `WHATSAPP_TOKEN`.
+
 ## Como voltar à versão anterior (rollback)
 
 Worker → **Deployments** → escolha a versão anterior → **Rollback**. Ou cole o
@@ -107,8 +126,12 @@ Worker → **Deployments** → escolha a versão anterior → **Rollback**. Ou c
   e o cliente é avisado disso.
 - **Mensagens com mais de 15 min de atraso** (a Meta reenviando depois de uma falha) não são
   respondidas automaticamente; a equipe é avisada.
-- **Se o D1 cair**, o cliente continua recebendo resposta cordial pelo KV, mas nada operacional é
-  feito: a equipe é avisada no Telegram.
+- **Se o D1 cair**: no máximo 1 resposta a cada 2 minutos por cliente, sem consultar prestadores;
+  prestadores e equipe não recebem resposta automática; o Telegram recebe 1 aviso por hora.
+  A cota gratuita do D1 volta todo dia às 21h (horário de Brasília). Veja o motivo exato em `/api/saude`.
+- **Trava contra rajadas**: no máximo 4 mensagens em 2 min, 10 em 10 min e 25 por hora para o
+  mesmo contato. Passou disso, os envios param e a equipe recebe um aviso.
+- **Bairro**: a DENIA não pergunta por iniciativa própria e nunca repete uma pergunta já feita.
 - **Treinamento** (`/treinar`): cada salvamento cria uma versão; dá para restaurar qualquer versão;
   apagar um campo preenchido exige confirmação.
 - **Relatório diário** às 20h no Telegram (e e-mail, se configurado), com casos parados e uma
@@ -132,7 +155,7 @@ Worker → **Deployments** → escolha a versão anterior → **Rollback**. Ou c
 
 ## Testes
 
-`cd engine && npm test` roda 22 cenários: os do handoff e os erros relatados (repetição,
+`cd engine && npm test` roda 28 cenários: os do handoff e os erros relatados (repetição,
 reabertura, promessa sem ação, prestador como cliente, Carlos/Anderson, mistura de casos,
 "que cliente?", "Eita, Niterói", preço inventado, confirmação sem prestador, D1 fora do ar,
 treinamento, assinatura da Meta etc.). Os testes usam um D1 real (SQLite) e simulam Meta,

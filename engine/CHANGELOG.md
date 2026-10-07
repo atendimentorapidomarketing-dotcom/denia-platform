@@ -1,5 +1,24 @@
 # Changelog — DENIA Engine
 
+## 30.1.0 — 2026-10-07
+
+### Corrigido (problemas relatados em produção)
+- Rajadas de mensagens: trava de segurança em todo envio real — no máximo 4 mensagens em
+  2 min, 10 em 10 min e 25 por hora para o mesmo contato, e 150 em 10 min no total. Ao
+  atingir o limite, os envios param e a equipe recebe UM aviso.
+- Contingência (D1 fora do ar) reescrita: agrupa mensagens seguidas; no máximo 1 resposta a
+  cada 2 min por contato; nunca responde prestadores nem a equipe (lista do D1 guardada no KV
+  e variável EQUIPE_TELEFONES); não responde mensagens atrasadas; não repete a última frase.
+- Telegram: aviso de contingência no máximo 1 vez por hora (antes era 1 por mensagem); teto de
+  12 alertas por hora no total.
+- Bairro perguntado várias vezes: a DENIA não pergunta bairro por iniciativa própria e nunca
+  repete uma pergunta (bairro, endereço, serviço, nome, modelo, foto, horário) já feita na
+  conversa; resposta curta logo após uma pergunta é registrada como o dado perguntado.
+
+### Novo
+- Botão "PAUSAR DENIA" no painel /chat e variável DENIA_PAUSADA=true: param todos os envios
+  automáticos reais.
+
 ## 30.0.0 — 2026-10-07
 
 Substitui o Worker v29.x por um motor reescrito em torno de uma máquina de estados durável.

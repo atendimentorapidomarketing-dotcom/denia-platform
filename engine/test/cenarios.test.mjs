@@ -266,10 +266,11 @@ test("D1 fora do ar: o cliente ainda recebe resposta (contingência) e nada oper
   await a.cliente(CLI, "Oi");
   assert.equal(a.ultimoPara(CLI), "Olá! Como podemos ajudar?");
   a.llmCliente = () => decisao({ resposta: "Vou consultar o profissional.", quer_orcamento_ou_atendimento: true, pronto_para_profissional: true, fatos: { servico: "chaveiro" } });
+  a.avancar(3 * 60 * 1000);
   await a.cliente(CLI, "Preciso de chaveiro para trocar fechadura");
-  assert.equal(a.ultimoPara(CLI), "Um momento, por favor.");
-  assert.equal(a.para(CHAVEIRO).length, 0);
-  assert.ok(a.telegram.some(t => /D1 indisponível/.test(t)));
+  assert.equal(a.ultimoPara(CLI), "Recebemos sua mensagem. Um atendente vai dar continuidade em instantes.");
+  assert.equal(a.para(CHAVEIRO).length, 0, "nenhuma ação operacional sem o banco");
+  assert.equal(a.telegram.filter(t => /CONTINGÊNCIA/.test(t)).length, 1);
 });
 
 test("Painel e treinamento: exige senha, importa o antigo, versiona e nunca apaga sem confirmar", async () => {
@@ -313,4 +314,79 @@ test("Simulador do painel roda o fluxo sem enviar nada pela Meta", async () => {
   assert.ok(r2.saidas.some(s => s.papel === "cliente" && /R\$\s30,00/.test(s.texto)));
   await a.http("/api/limpar-teste", { method: "POST" });
   assert.equal(a.DB.q("SELECT COUNT(*) n FROM d30_casos")[0].n, 0);
+});
+
+// ---------------------------------------------------------------------------
+// V30.1 — problemas relatados em produção
+// ---------------------------------------------------------------------------
+
+test("V30.1 — D1 fora do ar: rajada de mensagens recebe no máximo 1 resposta e 1 aviso no Telegram", async () => {
+  const a = await criarAmbiente({ env: { JANELA_AGRUPAMENTO_MS: "0", EQUIPE_TELEFONES: "5521955556666" } });
+  a.DB.falhar = true;
+  a.passo = 1000;
+  a.llmCliente = () => decisao({ resposta: "Olá! Em qual bairro você está?" });
+  for (let i = 0; i < 6; i++) await a.cliente(CLI, "mensagem " + i);
+  assert.equal(a.para(CLI).length, 1, "uma resposta, não seis");
+  await a.cliente("5521955556666", "sou da equipe");
+  await a.cliente(CHAVEIRO, "posso amanhã");
+  assert.equal(a.para("5521955556666").length, 0, "equipe nunca recebe resposta automática");
+  assert.equal(a.para(CHAVEIRO).length, 0, "prestador nunca recebe resposta na contingência");
+  assert.equal(a.telegram.length, 1, "um único aviso de contingência");
+  a.avancar(3 * 60 * 1000);
+  await a.cliente(CLI, "Botafogo");
+  const r = a.ultimoPara(CLI);
+  assert.ok(a.para(CLI).length <= 2);
+  if (a.para(CLI).length === 2) assert.doesNotMatch(r, /bairro/i, "não pergunta o bairro de novo");
+});
+
+test("V30.1 — a IA insiste em perguntar o bairro: só a primeira pergunta sai", async () => {
+  const a = await criarAmbiente();
+  a.llmCliente = () => decisao({ resposta: "Certo! Em qual bairro será o atendimento?", fatos: { servico: "pintura" } });
+  await a.cliente(CLI, "Quero pintar um quarto");
+  assert.match(a.ultimoPara(CLI), /bairro/);
+  a.llmCliente = () => decisao({ resposta: "Entendi. Qual é o seu bairro?" });
+  await a.cliente(CLI, "É um quarto de 12 m²");
+  assert.equal(a.para(CLI).filter(m => /bairro/i.test(m.texto)).length, 1, "bairro perguntado uma vez só");
+});
+
+test("V30.1 — resposta curta logo após a pergunta é registrada como o dado perguntado", async () => {
+  const a = await criarAmbiente();
+  a.llmCliente = () => decisao({ resposta: "Claro! Em qual bairro?", fatos: { servico: "pintura" } });
+  await a.cliente(CLI, "Quero pintar um quarto");
+  a.llmCliente = () => decisao({ resposta: "Obrigado!" });
+  await a.cliente(CLI, "Botafogo");
+  const f = JSON.parse(a.DB.q("SELECT fatos_json FROM d30_casos")[0].fatos_json);
+  assert.equal(f.bairro, "Botafogo");
+});
+
+test("V30.1 — trava de segurança: nunca mais de 4 mensagens em 2 minutos para o mesmo contato", async () => {
+  const a = await criarAmbiente();
+  a.passo = 1000;
+  let n = 0;
+  a.llmCliente = () => decisao({ resposta: "Resposta diferente número " + (++n) + "." });
+  for (let i = 0; i < 9; i++) await a.cliente(CLI, "msg " + i);
+  assert.equal(a.para(CLI).length, 4);
+  assert.ok(a.telegram.some(t => /TRAVA DE SEGURANÇA/.test(t)));
+  assert.equal(a.telegram.filter(t => /TRAVA/.test(t)).length, 1, "aviso da trava uma vez só");
+});
+
+test("V30.1 — botão de emergência pausa todos os envios automáticos", async () => {
+  const a = await criarAmbiente();
+  await a.http("/api/pausa-geral", { method: "POST", body: JSON.stringify({ ativa: true }) });
+  a.llmCliente = () => decisao({ resposta: "Olá!" });
+  await a.cliente(CLI, "Oi");
+  assert.equal(a.para(CLI).length, 0);
+  await a.http("/api/pausa-geral", { method: "POST", body: JSON.stringify({ ativa: false }) });
+  a.avancar(30000);
+  await a.cliente(CLI, "Oi de novo");
+  assert.equal(a.para(CLI).length, 1);
+});
+
+test("V30.1 — Telegram tem teto de alertas por hora", async () => {
+  const a = await criarAmbiente();
+  a.passo = 0;
+  a.llmPrestador = () => prest({ tipo: "COMENTARIO" });
+  await iniciarConsultaChaveiro(a);
+  for (let i = 0; i < 25; i++) await a.cliente(CHAVEIRO, "comentário solto " + i);
+  assert.ok(a.telegram.length <= 13, `foram ${a.telegram.length} alertas`);
 });
