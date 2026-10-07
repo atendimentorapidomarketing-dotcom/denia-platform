@@ -1,5 +1,7 @@
 # DENIA — Auditoria do Engine (código colado: "V29", internamente v29.7)
 
+> **Atualização:** a seção 6 (patches sobre a v29.7) foi substituída pela **DENIA Engine V30** em `engine/` (ver `engine/INSTALAR.md`). Este documento fica como registro do diagnóstico.
+
 Data: 2026-10-07
 Escopo: o código do Worker colado na conversa (cabeçalho "DENIA V29 — CLIENTE NUNCA ESCOLHE
 DESTINATÁRIO + DOMINGO SEGURO", `/api/saude` reporta `operacao-2026-10-07-v29.7-...`) e o
