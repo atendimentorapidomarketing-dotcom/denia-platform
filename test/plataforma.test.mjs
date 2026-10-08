@@ -44,11 +44,11 @@ async function criarPlataforma(extra = {}) {
   return p;
 }
 
-test("Plataforma — sem SESSION_SECRET não deixa entrar e explica o motivo", async () => {
+test("Plataforma — sem SESSION_SECRET a chave das sessões é criada sozinha", async () => {
   const p = await criarPlataforma({ SESSION_SECRET: "" });
   const r = await p.entrar("a", ADMIN, SENHA_ADMIN);
-  assert.equal(r.status, 503);
-  assert.match(r.dados.erro, /SESSION_SECRET/);
+  assert.equal(r.status, 200);
+  assert.equal((await p.req("/api/eu", { quem: "a" })).status, 200);
 });
 
 test("Plataforma — login do administrador geral, primeira empresa criada e cabeçalhos de segurança", async () => {
@@ -227,4 +227,38 @@ test("Plataforma — sem conexão configurada, explica o que fazer", async () =>
   const r = await p.req("/api/orgs/1/engine/status", { quem: "admin" });
   assert.equal(r.status, 503);
   assert.equal(r.dados.codigo, "ENGINE_NAO_CONFIGURADO");
+});
+
+test("Plataforma — funciona sem configurar nada: contas antigas, chave automática e IA pelas variáveis antigas", async () => {
+  const p = await criarPlataforma({ SESSION_SECRET: "", PLATFORM_ADMIN_EMAIL: "", PLATFORM_ADMIN_PASSWORD: "", DENIA_ENGINE_URL: "https://engine.test/", DENIA_PLATFORM_SERVICE_TOKEN: TOKEN_ENGINE });
+  // Tabelas e conta da versão anterior do site (PBKDF2 30 mil, sal e hash em hexadecimal).
+  const { pbkdf2Sync } = await import("node:crypto");
+  const salt = "00112233445566778899aabbccddeeff";
+  const hash = pbkdf2Sync("SenhaAntiga2026", Buffer.from(salt, "hex"), 30000, 32, "sha256").toString("hex");
+  p.env.DB.db.exec("CREATE TABLE organizations(id TEXT PRIMARY KEY,name TEXT NOT NULL); CREATE TABLE users(id TEXT PRIMARY KEY,organization_id TEXT NOT NULL,name TEXT NOT NULL,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,password_salt TEXT NOT NULL,role TEXT NOT NULL)");
+  p.env.DB.db.prepare("INSERT INTO organizations VALUES('o1','Central de Atendimento')").run();
+  p.env.DB.db.prepare("INSERT INTO users VALUES('u1','o1','Dona','dona@central.test',?,?,'SUPER_ADMIN')").run(hash, salt);
+  p.env.DB.db.prepare("INSERT INTO users VALUES('u2','o1','Ana','ana@central.test',?,?,'OWNER')").run(hash, salt);
+
+  assert.equal((await p.entrar("x", "dona@central.test", "errada")).status, 401);
+  const r = await p.entrar("dona", "dona@central.test", "SenhaAntiga2026");
+  assert.equal(r.status, 200, "a senha antiga continua valendo");
+  const eu = await p.req("/api/eu", { quem: "dona" });
+  assert.equal(eu.dados.usuario.super_admin, true);
+  assert.equal(eu.dados.organizacoes[0].conectada, true, "IA conectada pelas variáveis antigas");
+  const st = await p.req("/api/orgs/1/engine/status", { quem: "dona" });
+  assert.equal(st.status, 200);
+  const integ = await p.req("/api/orgs/1/integracao", { quem: "dona" });
+  assert.equal(integ.dados.origem, "cloudflare");
+  assert.ok(p.env.DB.q("SELECT valor FROM plt_meta WHERE chave='segredo'")[0].valor.length > 40, "chave de sessão criada sozinha");
+  const de_novo = await p.entrar("dona2", "dona@central.test", "SenhaAntiga2026");
+  assert.equal(de_novo.status, 200, "segundo acesso já pelo formato novo");
+
+  await p.entrar("ana", "ana@central.test", "SenhaAntiga2026");
+  const euAna = await p.req("/api/eu", { quem: "ana" });
+  assert.deepEqual(euAna.dados.organizacoes.map(o => [o.nome, o.papel]), [["Central de Atendimento", "OWNER"]]);
+
+  const antigo = await p.req("/login.html");
+  assert.equal(antigo.status, 302);
+  assert.equal(antigo.r.headers.get("location"), "/entrar");
 });
