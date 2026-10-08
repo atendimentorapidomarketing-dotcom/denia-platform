@@ -27,6 +27,7 @@ Worker → **Settings → Variables and Secrets**. Mantenha os que já existem
 | `WHATSAPP_TEMPLATE_CONSULTA_TECNICO` | Recomendado | Nome de um template aprovado pela Meta para falar com prestador que não escreveu nas últimas 24 h (ver Passo 7). |
 | `PLATAFORMA_API_URL` e `PLATAFORMA_API_TOKEN` | Se usar a plataforma de cadastro | Os mesmos da versão anterior. A DENIA envia clientes e atendimentos (serviço, prestador, valores, etapa) e só considera enviado quando a plataforma responde `ok: true` com `cliente_id` (e `os_id` para atendimentos). |
 | `CRM_CONSULTA_URL` e `CRM_TOKEN` | Opcional | Para a DENIA **ler** a ficha do cliente na plataforma (serviços feitos, valores). A DENIA chama `GET CRM_CONSULTA_URL?telefone=5521999999999` com `Authorization: Bearer CRM_TOKEN` e usa o JSON que voltar. Peça ao desenvolvedor da plataforma esse endereço. |
+| `DENIA_PLATFORM_SERVICE_TOKEN` | Para usar a DENIA Platform | Uma senha longa (mínimo 16 caracteres; use 40 ou mais) que você inventa. Coloque a mesma na tela **Integrações** da empresa na DENIA Platform. Com ela, a plataforma treina a IA, aprova aprendizados, importa clientes e acompanha conversas. |
 | `EQUIPE_TELEFONES` | Recomendado | Telefones da equipe, separados por vírgula (ex.: `5521999990000,5521988880000`). Se o D1 cair, esses números nunca recebem resposta automática. |
 | `DENIA_PAUSADA` | Emergência | Coloque `true` para parar todos os envios automáticos. Apague para voltar. |
 | `MARKUP_PERCENT` | Opcional | Acréscimo quando o prestador diz que o valor é "só a parte dele". Padrão: 50. |
@@ -149,6 +150,13 @@ Escreva no campo **SERVIÇOS** ou **REGRAS** do `/treinar` frases diretas, por e
 
 Quando a IA não tiver certeza, ela **não** consulta ninguém: responde "Um momento, por favor."
 e avisa a equipe no Telegram.
+
+## Aprender com os últimos 6 meses
+
+Pela DENIA Platform → **Treinar IA → Aprendizados**, clique em **Começar a aprender**. A DENIA lê
+as conversas aos poucos (cerca de 220 mensagens por minuto) e mostra sugestões. Você aprova,
+edita ou rejeita cada uma; só as aprovadas passam a valer. O custo é uma chamada à OpenAI por
+minuto enquanto a leitura estiver em andamento.
 
 ## Onde editar
 

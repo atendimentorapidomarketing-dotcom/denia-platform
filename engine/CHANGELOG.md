@@ -1,5 +1,19 @@
 # Changelog — DENIA Engine
 
+## 30.3.0 — 2026-10-08
+
+### Novo
+- Aprendizado com o histórico (últimos 6 meses): a DENIA lê as conversas antigas aos poucos
+  (um lote por minuto, no cron, para caber no plano gratuito), com telefones mascarados, e
+  gera **sugestões**: respostas padrão, preços praticados, quem atende o quê, regras, frases
+  típicas das atendentes e informações da empresa. Nada entra no treinamento sem aprovação.
+  Aprovadas vão para o novo campo **APRENDIZADOS** (ou para EXEMPLOS, no caso de estilo).
+- Importação do cadastro de clientes exportado do sistema das atendentes (planilha/CSV), até
+  500 linhas por envio. A ficha importada entra no contexto da conversa como dado oficial.
+- API para a DENIA Platform (token `DENIA_PLATFORM_SERVICE_TOKEN`): `/platform/learning`,
+  `/platform/learning/start`, `/platform/learning/suggestions`, `/platform/import/clients`.
+  Com isso, o treinamento passa a ser feito pela plataforma.
+
 ## 30.2.1 — 2026-10-08
 
 - Senha do painel passa a ser opcional: sem o secret PAINEL_SENHA, `/chat`, `/treinar` e

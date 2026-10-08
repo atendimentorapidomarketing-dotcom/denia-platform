@@ -35,8 +35,8 @@
 //       relatório diário. Nunca inicia conversa nova por conta própria.
 // ============================================================================
 
-const VERSAO = "30.2.1";
-const SCHEMA_VERSAO = "30.2.0-a";
+const VERSAO = "30.3.0";
+const SCHEMA_VERSAO = "30.3.0-a";
 const EMPRESA_ID = 1;
 const PHONE_ID_PADRAO = "473474732510163";
 const GRAPH = "v25.0";
@@ -104,11 +104,12 @@ const REGRA_REFORMA = /\b(reforma|pedreiro|pintura|pintor|hidraulic\w*|encanador
 const ETAPAS_ENCERRADAS = new Set(["CONCLUIDO", "CANCELADO"]);
 const STATUS_LEGADO_ENCERRADO = /^(FINALIZADO|SERVICO_CONCLUIDO|CONCLUIDO|CONCLUÍDO|CANCELADO|ENCERRADO|RESOLVIDO)$/i;
 
-const CAMPOS_TREINAMENTO = ["instrucoes", "servicos", "regras", "precos", "procedimentos", "informacoes", "exemplos"];
+const CAMPOS_TREINAMENTO = ["instrucoes", "servicos", "regras", "precos", "procedimentos", "informacoes", "exemplos", "aprendizados"];
 const ROTULOS_TREINAMENTO = {
   instrucoes: "INSTRUÇÕES DO ATENDIMENTO", servicos: "SERVIÇOS", regras: "REGRAS DA EMPRESA",
   precos: "PREÇOS E CONDIÇÕES AUTORIZADOS", procedimentos: "PROCEDIMENTOS",
-  informacoes: "INFORMAÇÕES DA EMPRESA", exemplos: "EXEMPLOS DE ATENDIMENTO"
+  informacoes: "INFORMAÇÕES DA EMPRESA", exemplos: "EXEMPLOS DE ATENDIMENTO",
+  aprendizados: "APRENDIZADOS APROVADOS (extraídos do histórico real e aprovados pela empresa)"
 };
 
 // ============================================================================
@@ -302,7 +303,12 @@ const SQL_SCHEMA = [
   `CREATE INDEX IF NOT EXISTS d30_saidas_ms ON d30_saidas(criado_ms)`,
   `CREATE TABLE IF NOT EXISTS d30_crm (telefone TEXT PRIMARY KEY, json TEXT NOT NULL, em_ms INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS d30_sync (chave TEXT PRIMARY KEY, evento TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDENTE', tentativas INTEGER NOT NULL DEFAULT 0, proxima_ms INTEGER NOT NULL DEFAULT 0, erro TEXT, atualizado_ms INTEGER NOT NULL)`,
-  `CREATE INDEX IF NOT EXISTS d30_sync_status ON d30_sync(status, proxima_ms)`
+  `CREATE INDEX IF NOT EXISTS d30_sync_status ON d30_sync(status, proxima_ms)`,
+  `CREATE TABLE IF NOT EXISTS d30_aprendizado_job (id TEXT PRIMARY KEY, status TEXT NOT NULL, inicio_id INTEGER, cursor_id INTEGER, fim_id INTEGER, lotes INTEGER NOT NULL DEFAULT 0, erros INTEGER NOT NULL DEFAULT 0, iniciado_ms INTEGER, atualizado_ms INTEGER)`,
+  `CREATE TABLE IF NOT EXISTS d30_sugestoes (id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT NOT NULL UNIQUE, tipo TEXT NOT NULL, titulo TEXT NOT NULL, conteudo TEXT NOT NULL, evidencia TEXT, ocorrencias INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'PENDENTE', criado_ms INTEGER NOT NULL, decidido_ms INTEGER, decidido_por TEXT)`,
+  `CREATE INDEX IF NOT EXISTS d30_sugestoes_status ON d30_sugestoes(status, ocorrencias)`,
+  `CREATE TABLE IF NOT EXISTS d30_ficha (id INTEGER PRIMARY KEY AUTOINCREMENT, telefone TEXT NOT NULL, dados_json TEXT NOT NULL, origem TEXT, importado_ms INTEGER NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS d30_ficha_tel ON d30_ficha(telefone)`
 ];
 const SQL_INDICES_LEGADO = [
   `CREATE INDEX IF NOT EXISTS d30_idx_msg_pessoa ON mensagens(empresa_id, pessoa_id, id)`,
@@ -404,7 +410,20 @@ async function estiloDaEquipe(c) {
 
 // Ficha do cliente no sistema de cadastro (CRM). Contrato: GET CRM_CONSULTA_URL?telefone=55DDDNUMERO
 // com "Authorization: Bearer CRM_TOKEN", resposta JSON livre (serviços feitos, valores, observações).
+// Ficha do cliente: registros importados do sistema das atendentes (planilha) + consulta online (opcional).
 async function fichaCRM(c, tel) {
+  const [importada, online] = await Promise.all([fichaImportada(c, tel), fichaOnline(c, tel)]);
+  return [importada, online].filter(Boolean).join("\n");
+}
+async function fichaImportada(c, tel) {
+  try {
+    const vs = variantesTel(tel);
+    const r = (await c.db.prepare(`SELECT dados_json FROM d30_ficha WHERE telefone IN (${vs.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 15`).bind(...vs).all())?.results || [];
+    if (!r.length) return "";
+    return "Registros do sistema das atendentes:\n" + r.map(x => "- " + txt(x.dados_json, 400)).join("\n");
+  } catch (e) { return ""; }
+}
+async function fichaOnline(c, tel) {
   const url = String(c.env.CRM_CONSULTA_URL || "").trim();
   if (c.sim || !/^https:\/\//i.test(url)) return "";
   const t = digitos(tel);
@@ -418,6 +437,110 @@ async function fichaCRM(c, tel) {
     await c.db.prepare("INSERT OR REPLACE INTO d30_crm(telefone,json,em_ms) VALUES(?,?,?)").bind(t, corpo, c.agora()).run();
     return corpo;
   } catch (e) { console.warn("CRM", e?.message); return ""; }
+}
+
+// ============================================================================
+// APRENDIZADO COM O HISTÓRICO (6 meses) — sugestões que a empresa aprova
+// ============================================================================
+// Roda aos poucos no cron (um lote de mensagens por minuto) para caber no plano
+// gratuito. Nada entra no treinamento sem aprovação.
+
+const LOTE_APRENDIZADO = 220;
+const TIPOS_SUGESTAO = ["RESPOSTA_PADRAO", "PRECO_PRATICADO", "QUEM_ATENDE", "REGRA", "ESTILO", "INFORMACAO"];
+
+async function iniciarAprendizado(c) {
+  const fim = Number((await c.db.prepare("SELECT COALESCE(MAX(id),0) n FROM mensagens").first())?.n || 0);
+  const limite = new Date(c.agora() - 183 * 86400000).toISOString().slice(0, 19).replace("T", " ");
+  const ini = await c.db.prepare("SELECT id FROM mensagens WHERE criado_em >= ? ORDER BY id LIMIT 1").bind(limite).first();
+  const inicio = Number(ini?.id || fim);
+  await c.db.prepare(`INSERT OR REPLACE INTO d30_aprendizado_job(id,status,inicio_id,cursor_id,fim_id,lotes,erros,iniciado_ms,atualizado_ms) VALUES('principal','RODANDO',?,?,?,0,0,?,?)`)
+    .bind(inicio, inicio - 1, fim, c.agora(), c.agora()).run();
+  return statusAprendizado(c);
+}
+async function statusAprendizado(c) {
+  const j = await c.db.prepare("SELECT * FROM d30_aprendizado_job WHERE id='principal'").first();
+  const cont = (await c.db.prepare("SELECT status, COUNT(*) n FROM d30_sugestoes GROUP BY status").all())?.results || [];
+  const total = j ? Math.max(1, j.fim_id - j.inicio_id + 1) : 1;
+  const feito = j ? Math.min(total, Math.max(0, j.cursor_id - j.inicio_id + 1)) : 0;
+  return { status: j?.status || "NUNCA_EXECUTADO", progresso: j ? Math.round((feito / total) * 100) : 0, lotes: j?.lotes || 0, erros: j?.erros || 0, iniciado_ms: j?.iniciado_ms || null, atualizado_ms: j?.atualizado_ms || null, sugestoes: Object.fromEntries(cont.map(x => [x.status, x.n])) };
+}
+async function processarAprendizado(c) {
+  const j = await c.db.prepare("SELECT * FROM d30_aprendizado_job WHERE id='principal' AND status='RODANDO'").first();
+  if (!j || !c.env.OPENAI_API_KEY) return;
+  const linhas = (await c.db.prepare(`SELECT m.id, m.pessoa_id, m.caso_id, m.direcao, m.origem, m.conteudo, p.tipo, p.telefone FROM mensagens m LEFT JOIN pessoas p ON p.id = m.pessoa_id
+    WHERE m.id > ? AND m.id <= ? ORDER BY m.id LIMIT ?`).bind(j.cursor_id, j.fim_id, LOTE_APRENDIZADO).all())?.results || [];
+  if (!linhas.length) { await c.db.prepare("UPDATE d30_aprendizado_job SET status='CONCLUIDO', atualizado_ms=? WHERE id='principal'").bind(c.agora()).run(); return; }
+  const novoCursor = linhas[linhas.length - 1].id;
+  const porPessoa = new Map();
+  for (const m of linhas) {
+    const prestador = prestadorPorTelefone(m.telefone);
+    const quem = String(m.direcao).toUpperCase() === "SAIDA" ? (String(m.origem).toUpperCase() === "HUMANO" ? "ATENDENTE" : "DENIA") : (prestador || String(m.tipo).toUpperCase() === "TECNICO" ? `PROFISSIONAL${prestador ? " (" + prestador.area + ")" : ""}` : "CLIENTE");
+    const k = m.pessoa_id || "x";
+    if (!porPessoa.has(k)) porPessoa.set(k, []);
+    porPessoa.get(k).push(`${quem}: ${ocultarTelefones(txt(m.conteudo, 300))}`);
+  }
+  const transcricao = [...porPessoa.values()].map((l, i) => `--- Conversa ${i + 1}\n${l.join("\n")}`).join("\n").slice(0, 28000);
+  try {
+    const treino = await carregarTreinamento(c);
+    const o = await openaiJSON(c, `Você analisa conversas reais de uma central de atendimento para ensinar a assistente virtual DENIA. Extraia SOMENTE conhecimentos úteis, repetíveis e confirmados nas conversas — de preferência ditos pelas ATENDENTES ou confirmados por PROFISSIONAIS. Nunca extraia dados pessoais (nomes, telefones, endereços, CPF). Ignore erros da própria DENIA e não transforme casos isolados em regra. Não repita o que já está no TREINAMENTO ATUAL.
+Tipos: RESPOSTA_PADRAO (como a equipe responde uma dúvida comum), PRECO_PRATICADO (faixa de valor realmente praticada para um serviço, com a condição), QUEM_ATENDE (qual área/profissional faz qual serviço — e o que NÃO faz), REGRA (procedimento ou política da empresa), ESTILO (frase curta típica das atendentes, para imitar o tom), INFORMACAO (horário, endereço da loja, formas de pagamento etc.).
+Responda em JSON: {"itens":[{"tipo":"","titulo":"","conteudo":"","evidencia":""}]} com no máximo 8 itens; "conteudo" é o texto pronto para entrar no treinamento (1 a 3 frases); "evidencia" resume onde isso apareceu. Se não houver nada útil, {"itens":[]}.`,
+      `TREINAMENTO ATUAL (resumo):\n${formatarTreinamento(treino.dados).slice(0, 6000)}\n\nCONVERSAS:\n${transcricao}\n\nResponda em JSON.`, [], 1600);
+    for (const it of (Array.isArray(o?.itens) ? o.itens : []).slice(0, 8)) {
+      const tipo = TIPOS_SUGESTAO.includes(String(it?.tipo).toUpperCase()) ? String(it.tipo).toUpperCase() : "";
+      const titulo = ocultarTelefones(txt(it?.titulo, 140)), conteudo = ocultarTelefones(txt(it?.conteudo, 600));
+      if (!tipo || !titulo || !conteudo || /\b(cpf|rg)\b/i.test(conteudo)) continue;
+      const hash = await hmacHex("sugestao", tipo + "|" + norm(titulo));
+      await c.db.prepare(`INSERT INTO d30_sugestoes(hash,tipo,titulo,conteudo,evidencia,ocorrencias,status,criado_ms) VALUES(?,?,?,?,?,1,'PENDENTE',?)
+        ON CONFLICT(hash) DO UPDATE SET ocorrencias=d30_sugestoes.ocorrencias+1`).bind(hash, tipo, titulo, conteudo, ocultarTelefones(txt(it?.evidencia, 300)), c.agora()).run();
+    }
+    await c.db.prepare("UPDATE d30_aprendizado_job SET cursor_id=?, lotes=lotes+1, atualizado_ms=? WHERE id='principal'").bind(novoCursor, c.agora()).run();
+  } catch (e) {
+    console.error("aprendizado", e?.message);
+    const erros = Number(j.erros) + 1;
+    // Depois de 3 falhas seguidas no mesmo lote, pula o lote para não travar.
+    await c.db.prepare("UPDATE d30_aprendizado_job SET erros=?, cursor_id=?, atualizado_ms=? WHERE id='principal'").bind(erros, erros % 3 === 0 ? novoCursor : j.cursor_id, c.agora()).run();
+  }
+}
+async function decidirSugestao(c, id, acao, texto, autor) {
+  const s = await c.db.prepare("SELECT * FROM d30_sugestoes WHERE id=?").bind(id).first();
+  if (!s) return { ok: false, erro: "Sugestão não encontrada." };
+  if (s.status !== "PENDENTE") return { ok: false, erro: "Esta sugestão já foi decidida." };
+  if (acao === "rejeitar") {
+    await c.db.prepare("UPDATE d30_sugestoes SET status='REJEITADA', decidido_ms=?, decidido_por=? WHERE id=?").bind(c.agora(), autor, id).run();
+    return { ok: true };
+  }
+  const conteudo = txt(texto || s.conteudo, 800);
+  const atual = await carregarTreinamento(c);
+  const campo = s.tipo === "ESTILO" ? "exemplos" : "aprendizados";
+  const linha = s.tipo === "ESTILO" ? `Atendente: ${conteudo}` : `- [${s.tipo.replace("_", " ").toLowerCase()}] ${s.titulo}: ${conteudo}`;
+  const novo = [String(atual.dados?.[campo] || "").trim(), linha].filter(Boolean).join("\n");
+  const r = await salvarTreinamento(c, { [campo]: novo }, `${autor} (aprendizado #${id})`, false);
+  if (!r.ok) return { ok: false, erro: "Não foi possível salvar no treinamento." };
+  await c.db.prepare("UPDATE d30_sugestoes SET status='APROVADA', conteudo=?, decidido_ms=?, decidido_por=? WHERE id=?").bind(conteudo, c.agora(), autor, id).run();
+  return { ok: true, versao: r.versao };
+}
+
+// Importação do cadastro de clientes exportado do sistema das atendentes (planilha/CSV).
+function telefoneBR(v) {
+  let t = digitos(v);
+  if (t.length === 10 || t.length === 11) t = "55" + t;
+  return t.length >= 12 && t.length <= 13 ? t : "";
+}
+async function importarClientes(c, linhas, origem) {
+  let importadas = 0, ignoradas = 0;
+  const stmts = [];
+  for (const l of (Array.isArray(linhas) ? linhas : []).slice(0, 500)) {
+    const tel = telefoneBR(l?.telefone);
+    if (!tel || typeof l !== "object") { ignoradas++; continue; }
+    const dados = {};
+    for (const [k, v] of Object.entries(l)) if (k !== "telefone" && String(v ?? "").trim()) dados[txt(k, 40)] = txt(v, 300);
+    if (!Object.keys(dados).length) { ignoradas++; continue; }
+    stmts.push(c.db.prepare("INSERT INTO d30_ficha(telefone,dados_json,origem,importado_ms) VALUES(?,?,?,?)").bind(tel, JSON.stringify(dados), txt(origem, 80) || "importação", c.agora()));
+    importadas++;
+  }
+  for (let i = 0; i < stmts.length; i += 50) await c.db.batch(stmts.slice(i, i + 50));
+  return { importadas, ignoradas };
 }
 
 // Sincronização com a plataforma de cadastro (mesmo contrato da versão anterior:
@@ -1876,6 +1999,7 @@ async function cron(c) {
   for (const t of tels) await processarPendentes(c, t.telefone);
   await processarAgendados(c);
   await processarSync(c).catch(e => console.error("sync", e));
+  await processarAprendizado(c).catch(e => console.error("aprendizado", e));
   await relatorioDiario(c).catch(e => console.error("relatório", e));
   const dia = dataSP(agora);
   if (await reservarChave(c, "limpeza:" + dia)) {
@@ -2025,6 +2149,24 @@ async function platformApi(request, env, caminho, metodo) {
   if (caminho === "/platform/training" && metodo === "POST") {
     const r = await salvarTreinamento(c, corpo?.treinamento || corpo, String(corpo?.autor || "platform"), corpo?.confirmar_vazio === true);
     return json({ sucesso: r.ok, ...r }, r.ok ? 200 : 409);
+  }
+  if (caminho === "/platform/learning" && metodo === "GET") return json({ sucesso: true, ...(await statusAprendizado(c)) });
+  if (caminho === "/platform/learning/start" && metodo === "POST") return json({ sucesso: true, ...(await iniciarAprendizado(c)) });
+  if (caminho === "/platform/learning/suggestions" && metodo === "GET") {
+    const st = String(new URL(request.url).searchParams.get("status") || "PENDENTE").toUpperCase();
+    const r = await c.db.prepare("SELECT id,tipo,titulo,conteudo,evidencia,ocorrencias,status,criado_ms,decidido_ms,decidido_por FROM d30_sugestoes WHERE status=? ORDER BY ocorrencias DESC, id DESC LIMIT 200").bind(["PENDENTE", "APROVADA", "REJEITADA"].includes(st) ? st : "PENDENTE").all();
+    return json({ sucesso: true, sugestoes: r?.results || [] });
+  }
+  if ((m = caminho.match(/^\/platform\/learning\/suggestions\/(\d+)$/)) && metodo === "POST") {
+    const acao = String(corpo?.acao || "");
+    if (!["aprovar", "rejeitar"].includes(acao)) return json({ sucesso: false, erro: "Ação inválida." }, 400);
+    const r = await decidirSugestao(c, Number(m[1]), acao, corpo?.conteudo, txt(corpo?.autor, 120) || "platform");
+    return json({ sucesso: r.ok, ...r }, r.ok ? 200 : 409);
+  }
+  if (caminho === "/platform/import/clients" && metodo === "POST") return json({ sucesso: true, ...(await importarClientes(c, corpo?.linhas, corpo?.origem)) });
+  if (caminho === "/platform/import/clients" && metodo === "GET") {
+    const n = await c.db.prepare("SELECT COUNT(*) n, COUNT(DISTINCT telefone) t, MAX(importado_ms) u FROM d30_ficha").first();
+    return json({ sucesso: true, registros: Number(n?.n || 0), clientes: Number(n?.t || 0), ultima_importacao_ms: n?.u || null });
   }
   if (caminho === "/platform/professionals") return json({ sucesso: true, profissionais: PRESTADORES.map(p => ({ ...p, area_rotulo: CATEGORIAS[p.area]?.rotulo })) });
   return json({ sucesso: false, erro: "Rota não encontrada." }, 404);

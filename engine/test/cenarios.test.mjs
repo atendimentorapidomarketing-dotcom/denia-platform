@@ -503,3 +503,76 @@ test("V30.2 — casos e clientes sincronizam com a plataforma de cadastro, com c
   await a.cron();
   assert.equal(a.plataforma.length, n, "não reenvia o que já foi confirmado");
 });
+
+const SERVICO = "token-de-servico-da-plataforma-123";
+const api = (a, caminho, op = {}) => a.http(caminho, { ...op, headers: { authorization: "Bearer " + SERVICO, ...(op.headers || {}) } });
+
+test("V30.3 — aprendizado: lê o histórico, sugere, só entra no treinamento depois de aprovado", async () => {
+  const a = await criarAmbiente({ env: { DENIA_PLATFORM_SERVICE_TOKEN: SERVICO } });
+  a.llmCliente = () => decisao({ resposta: "Oi! Como posso ajudar?" });
+  await a.cliente(CLI, "Oi, vocês consertam máquina de lavar?");
+  await a.eco(CLI, "Consertamos sim! O técnico de eletrodomésticos faz a visita.");
+  await a.cliente(CLI2, "Meu telefone é 21 99999-8888, quanto custa a visita?");
+
+  const sem = await a.http("/platform/learning");
+  assert.equal(sem.status, 401, "API da plataforma exige o token de serviço");
+
+  const ini = await (await api(a, "/platform/learning/start", { method: "POST", body: "{}" })).json();
+  assert.equal(ini.status, "RODANDO");
+
+  let transcricao = "";
+  a.llmAprendizado = (e) => {
+    transcricao = e;
+    return { itens: [
+      { tipo: "QUEM_ATENDE", titulo: "Máquina de lavar", conteudo: "Máquina de lavar é com o técnico de eletrodomésticos, nunca com o eletricista.", evidencia: "atendente" },
+      { tipo: "ESTILO", titulo: "Confirmação simpática", conteudo: "Consertamos sim! 😊", evidencia: "atendente" },
+      { tipo: "REGRA", titulo: "Dado pessoal", conteudo: "Pedir o CPF do cliente", evidencia: "x" },
+      { tipo: "INVENTADO", titulo: "x", conteudo: "y" }
+    ] };
+  };
+  await a.cron();
+  assert.match(transcricao, /ATENDENTE: Consertamos sim/);
+  assert.match(transcricao, /CLIENTE: Oi, vocês consertam/);
+  assert.doesNotMatch(transcricao, /99999-8888|999998888/, "telefones mascarados antes de ir para a IA");
+
+  await a.cron();
+  const st = await (await api(a, "/platform/learning")).json();
+  assert.equal(st.status, "CONCLUIDO");
+  assert.equal(st.progresso, 100);
+  assert.equal(st.sugestoes.PENDENTE, 2, "CPF e tipo inválido são descartados");
+
+  const { sugestoes } = await (await api(a, "/platform/learning/suggestions")).json();
+  const quem = sugestoes.find(s => s.tipo === "QUEM_ATENDE");
+  const estilo = sugestoes.find(s => s.tipo === "ESTILO");
+
+  let treino = (await (await api(a, "/platform/training")).json()).dados;
+  assert.doesNotMatch(JSON.stringify(treino || {}), /Máquina de lavar/, "nada entra sem aprovação");
+
+  const ok = await (await api(a, "/platform/learning/suggestions/" + quem.id, { method: "POST", body: JSON.stringify({ acao: "aprovar", autor: "Dono" }) })).json();
+  assert.equal(ok.sucesso, true);
+  await api(a, "/platform/learning/suggestions/" + estilo.id, { method: "POST", body: JSON.stringify({ acao: "rejeitar" }) });
+  const de_novo = await api(a, "/platform/learning/suggestions/" + quem.id, { method: "POST", body: JSON.stringify({ acao: "aprovar" }) });
+  assert.equal(de_novo.status, 409, "não decide duas vezes");
+
+  treino = (await (await api(a, "/platform/training")).json()).dados;
+  assert.match(treino.aprendizados, /\[quem atende\] Máquina de lavar: Máquina de lavar é com o técnico/);
+  assert.doesNotMatch(treino.exemplos || "", /Consertamos sim! 😊/, "rejeitada não entra");
+
+  a.llmCliente = (e) => { assert.match(e, /APRENDIZADOS APROVADOS[\s\S]*técnico de eletrodomésticos/); return decisao({ resposta: "Claro!" }); };
+  await a.cliente(CLI, "Oi de novo");
+});
+
+test("V30.3 — importação do cadastro de clientes: telefone normalizado e ficha no contexto", async () => {
+  const a = await criarAmbiente({ env: { DENIA_PLATFORM_SERVICE_TOKEN: SERVICO } });
+  const r = await (await api(a, "/platform/import/clients", { method: "POST", body: JSON.stringify({ origem: "planilha.csv", linhas: [
+    { telefone: "(21) 91111-2222", nome: "Joana Prado", ultimo_servico: "Conserto de geladeira em 05/2026" },
+    { telefone: "123", nome: "Inválido" },
+    { telefone: "21933334444" }
+  ] }) })).json();
+  assert.deepEqual([r.importadas, r.ignoradas], [1, 2]);
+  const resumo = await (await api(a, "/platform/import/clients")).json();
+  assert.equal(resumo.clientes, 1);
+  a.llmCliente = (e) => { assert.match(e, /FICHA NO SISTEMA[\s\S]*Joana Prado[\s\S]*geladeira/); return decisao({ resposta: "Oi, Joana!" }); };
+  await a.cliente(CLI, "Oi");
+  assert.equal(a.ultimoPara(CLI), "Oi, Joana!");
+});
