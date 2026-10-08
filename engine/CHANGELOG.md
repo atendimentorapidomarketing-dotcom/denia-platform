@@ -1,5 +1,18 @@
 # Changelog — DENIA Engine
 
+## 30.4.0 — 2026-10-08
+
+### Novo
+- Ponte contínua cliente ↔ profissional: depois do orçamento (ou já agendado), cada dúvida do
+  cliente que só o profissional sabe responder (material, garantia, prazo, detalhes) vai ao
+  profissional com o número do caso; a resposta dele volta ao cliente. Repete quantas vezes
+  for preciso, até não haver mais dúvidas.
+
+### Corrigido
+- Uma resposta só, não importa quantas mensagens o cliente mande: a DENIA espera ele parar de
+  escrever (15 s) e, se chegar mensagem nova enquanto ela pensa, descarta a resposta em
+  preparo e responde tudo junto (espera máxima de 3 minutos).
+
 ## 30.3.0 — 2026-10-08
 
 ### Novo

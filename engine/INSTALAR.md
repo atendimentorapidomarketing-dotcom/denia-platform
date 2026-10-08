@@ -31,7 +31,7 @@ Worker → **Settings → Variables and Secrets**. Mantenha os que já existem
 | `EQUIPE_TELEFONES` | Recomendado | Telefones da equipe, separados por vírgula (ex.: `5521999990000,5521988880000`). Se o D1 cair, esses números nunca recebem resposta automática. |
 | `DENIA_PAUSADA` | Emergência | Coloque `true` para parar todos os envios automáticos. Apague para voltar. |
 | `MARKUP_PERCENT` | Opcional | Acréscimo quando o prestador diz que o valor é "só a parte dele". Padrão: 50. |
-| `JANELA_AGRUPAMENTO_MS` | Opcional | Espera para juntar mensagens seguidas. Padrão 8000 (8 s), máximo 15000. |
+| `JANELA_AGRUPAMENTO_MS` | Opcional | Quanto tempo a DENIA espera o cliente parar de escrever antes de responder (tudo numa resposta só). Padrão 15000 (15 s), máximo 20000. Se tiver este secret com 8000 da versão antiga, apague-o. |
 | `RELATORIO_GMAIL_URL`, `RELATORIO_GMAIL_SEGREDO`, `RELATORIO_EMAIL_TO` | Opcional | Relatório diário por e-mail, usando o mesmo Google Apps Script da versão anterior. Sem eles, o relatório vai só para o Telegram. |
 
 ## Passo 3 — Conferir bindings e cron (1 min)
