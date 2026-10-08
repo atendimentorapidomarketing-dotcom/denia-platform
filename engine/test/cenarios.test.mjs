@@ -390,3 +390,116 @@ test("V30.1 — Telegram tem teto de alertas por hora", async () => {
   for (let i = 0; i < 25; i++) await a.cliente(CHAVEIRO, "comentário solto " + i);
   assert.ok(a.telegram.length <= 13, `foram ${a.telegram.length} alertas`);
 });
+
+// ---------------------------------------------------------------------------
+// V30.2 — roteamento pelo treinamento, cliente antigo, certeza de valor, login, cadastro
+// ---------------------------------------------------------------------------
+const WILLIAM = "5521966142206";
+
+test("V30.2 — aparelho ligado no 220 V NUNCA vai para o eletricista", async () => {
+  const a = await criarAmbiente();
+  a.llmCliente = () => decisao({ resposta: "Poxa, que chato! Vamos ver isso.", intencao: "NOVO_PEDIDO", quer_orcamento_ou_atendimento: true, pronto_para_profissional: true, categoria_confianca: "ALTA", fatos: { servico: "conserto de micro-ondas", problema: "liguei o micro-ondas na tomada 220v e queimou", categoria: "ELETRICA" } });
+  await a.cliente(CLI, "Liguei meu micro-ondas na tomada 220v e queimou");
+  assert.equal(a.para(WILLIAM).length, 0, "eletricista não recebe");
+  assert.doesNotMatch(a.ultimoPara(CLI), /^Enviamos/);
+  assert.ok(a.telegram.some(t => /não tenho certeza|Sem prestador/.test(t)), "equipe é avisada");
+});
+
+test("V30.2 — geladeira queimada no 220 V vai para a assistência técnica, não para o eletricista", async () => {
+  const a = await criarAmbiente();
+  a.llmCliente = () => decisao({ resposta: "Poxa!", intencao: "NOVO_PEDIDO", quer_orcamento_ou_atendimento: true, pronto_para_profissional: true, categoria_confianca: "ALTA", fatos: { servico: "conserto de geladeira", problema: "geladeira queimou ao ligar na tomada 220v", categoria: "ASSISTENCIA_TECNICA" } });
+  await a.cliente(CLI, "Minha geladeira queimou, liguei na tomada 220");
+  assert.equal(a.para(WILLIAM).length, 0);
+  assert.equal(a.para(CARLOS_ASSIST).length, 1);
+});
+
+test("V30.2 — categoria incerta: não consulta ninguém, equipe decide", async () => {
+  const a = await criarAmbiente();
+  a.llmCliente = () => decisao({ resposta: "Entendi.", intencao: "NOVO_PEDIDO", quer_orcamento_ou_atendimento: true, pronto_para_profissional: true, categoria_confianca: "MEDIA", fatos: { servico: "instalação de suporte de TV", categoria: "REFORMA" } });
+  await a.cliente(CLI, "Quero instalar um suporte de TV");
+  assert.equal(a.enviados.filter(e => e.to !== CLI).length, 0, "nenhum prestador consultado");
+  assert.ok(a.telegram.some(t => /não tenho certeza/.test(t)));
+});
+
+test("V30.2 — cliente antigo: perfil, histórico e jeito das atendentes entram no contexto", async () => {
+  const a = await criarAmbiente();
+  a.llmCliente = () => decisao({ resposta: "Oi!" });
+  await a.cliente(CLI, "oi");
+  const p = a.DB.q("SELECT id FROM pessoas WHERE telefone=?", CLI)[0];
+  a.DB.db.prepare("UPDATE pessoas SET criado_em='2026-03-02 10:00:00', nome='Joana' WHERE id=?").run(p.id);
+  a.DB.db.prepare("INSERT INTO casos(empresa_id,cliente_id,status,titulo,problema,bairro,criado_em) VALUES(1,?,'FINALIZADO','Marcenaria','Armário da cozinha','Botafogo','2026-04-10 10:00:00')").run(p.id);
+  a.DB.db.prepare("INSERT INTO mensagens(empresa_id,pessoa_id,direcao,origem,conteudo) VALUES(1,?,'SAIDA','HUMANO','Oii Joana, tudo bem? Já já te passo o retorno, tá? 😊')").run(p.id);
+  a.llmCliente = (e) => {
+    assert.match(e, /Cliente desde 02\/03\/2026/);
+    assert.match(e, /Armário da cozinha/);
+    assert.match(e, /COMO A EQUIPE FALA[\s\S]*Já já te passo o retorno/);
+    return decisao({ resposta: "Oi, Joana! Tudo bem? Como posso ajudar hoje?" });
+  };
+  a.avancar(5 * 60000);
+  await a.cliente(CLI, "Oi, sou eu de novo");
+  assert.ok(a.para(CLI).length >= 2);
+});
+
+test("V30.2 — ficha da plataforma de cadastro (CRM) entra no contexto", async () => {
+  const a = await criarAmbiente({ env: { CRM_CONSULTA_URL: "https://crm.test/clientes", CRM_TOKEN: "crm-token" } });
+  a.crmResposta = { cliente: "Joana", servicos: [{ data: "2026-05-01", servico: "Armário planejado", valor: 2790 }] };
+  a.llmCliente = (e) => { assert.match(e, /FICHA NO SISTEMA[\s\S]*Armário planejado/); return decisao({ resposta: "Oi, Joana!" }); };
+  await a.cliente(CLI, "Oi");
+  assert.equal(a.crmConsultas.length, 1);
+  assert.match(a.crmConsultas[0], /telefone=5521911112222/);
+});
+
+test("V30.2 — prestador manda dois valores: DENIA confirma antes; se continuar ambíguo, nada vai ao cliente", async () => {
+  const a = await criarAmbiente();
+  await iniciarConsultaChaveiro(a);
+  const antes = a.para(CLI).length;
+  a.llmPrestador = () => prest({ tipo: "ACEITA", valor_centavos: 40000, valor_e_final: "NAO", disponibilidade: "amanhã" });
+  await a.cliente(CHAVEIRO, "Fica 400 ou 500, amanhã");
+  assert.match(a.ultimoPara(CHAVEIRO), /valor TOTAL/);
+  assert.equal(a.para(CLI).length, antes, "cliente não recebe valor incerto");
+  a.llmPrestador = () => prest({ tipo: "ACEITA", valor_centavos: 50000, valor_e_final: "NAO" });
+  await a.cliente(CHAVEIRO, "uns 450 ou 500");
+  assert.equal(a.para(CLI).length, antes, "segue sem passar valor");
+  assert.ok(a.telegram.some(t => /não consegui confirmar com certeza/.test(t)));
+});
+
+test("V30.2 — valor claro em uma mensagem passa direto", async () => {
+  const a = await criarAmbiente();
+  await iniciarConsultaChaveiro(a);
+  a.llmPrestador = () => prest({ tipo: "ACEITA", valor_centavos: 15000, valor_e_final: "SIM", disponibilidade: "dia 15 às 10h" });
+  await a.cliente(CHAVEIRO, "Faço dia 15 às 10h, 150 já é o valor final");
+  assert.equal(a.ultimoPara(CLI), "O profissional pode atender dia 15 às 10h. O valor fica R$ 150,00. Podemos confirmar?");
+});
+
+test("V30.2 — login: página com senha e cookie de sessão", async () => {
+  const a = await criarAmbiente();
+  const sem = await a.worker.fetch(new Request("https://denia.test/chat"), a.env, { waitUntil() { } });
+  assert.equal(sem.status, 302);
+  assert.equal(sem.headers.get("location"), "/login");
+  const pag = await a.worker.fetch(new Request("https://denia.test/login"), a.env, { waitUntil() { } });
+  assert.match(await pag.text(), /type="password"/);
+  const errado = await a.worker.fetch(new Request("https://denia.test/login", { method: "POST", body: new URLSearchParams({ senha: "x" }) }), a.env, { waitUntil() { } });
+  assert.equal(errado.status, 401);
+  const ok = await a.worker.fetch(new Request("https://denia.test/login", { method: "POST", body: new URLSearchParams({ senha: "senha-de-teste-123" }) }), a.env, { waitUntil() { } });
+  assert.equal(ok.status, 302);
+  const cookie = ok.headers.get("set-cookie").split(";")[0];
+  const dentro = await a.worker.fetch(new Request("https://denia.test/chat", { headers: { cookie } }), a.env, { waitUntil() { } });
+  assert.equal(dentro.status, 200);
+  const semSegredo = await a.worker.fetch(new Request("https://denia.test/login"), { ...a.env, PAINEL_SENHA: "" }, { waitUntil() { } });
+  assert.match(await semSegredo.text(), /PAINEL_SENHA/);
+});
+
+test("V30.2 — casos e clientes sincronizam com a plataforma de cadastro, com confirmação", async () => {
+  const a = await criarAmbiente({ env: { PLATAFORMA_API_URL: "https://plataforma.test/api", PLATAFORMA_API_TOKEN: "plat" } });
+  await iniciarConsultaChaveiro(a);
+  await a.cron();
+  const eventos = a.plataforma.map(x => x.corpo.evento);
+  assert.ok(eventos.includes("CLIENTE_ATUALIZADO"));
+  assert.ok(eventos.includes("ATUALIZACAO"));
+  const os = a.plataforma.find(x => x.corpo.atendimento);
+  assert.equal(os.corpo.atendimento.problema, "troca de fechadura");
+  assert.equal(os.headers.Authorization, "Bearer plat");
+  const n = a.plataforma.length;
+  await a.cron();
+  assert.equal(a.plataforma.length, n, "não reenvia o que já foi confirmado");
+});

@@ -1,4 +1,4 @@
-# DENIA Engine V30.1 — como instalar no Cloudflare
+# DENIA Engine V30.2 — como instalar no Cloudflare
 
 Arquivo para colar: `engine/worker.js` (um arquivo só, ~1.900 linhas).
 Funciona no **plano gratuito** da Cloudflare. Usa o mesmo D1 (`DB`) e o mesmo KV
@@ -21,10 +21,12 @@ Worker → **Settings → Variables and Secrets**. Mantenha os que já existem
 
 | Nome | Obrigatório? | O que é |
 |---|---|---|
-| `PAINEL_SENHA` | **Sim** | Senha dos painéis `/chat`, `/treinar`, `/api/saude` (mínimo 12 caracteres). Sem ela, os painéis ficam bloqueados. |
+| `PAINEL_SENHA` | **Sim** | Senha do painel (mínimo 8 caracteres). Você entra em `https://SEU-WORKER.workers.dev/login`, digita essa senha e fica conectado por 30 dias. |
 | `META_APP_SECRET` | Recomendado | "Chave secreta do app" (Meta for Developers → seu app → Configurações → Básico). Impede que alguém forje mensagens no webhook. |
 | `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID` | Recomendado | Alertas para a equipe e o aviso de "SERVIÇO AGENDADO". Sem eles, os alertas só aparecem no log. |
 | `WHATSAPP_TEMPLATE_CONSULTA_TECNICO` | Recomendado | Nome de um template aprovado pela Meta para falar com prestador que não escreveu nas últimas 24 h (ver Passo 7). |
+| `PLATAFORMA_API_URL` e `PLATAFORMA_API_TOKEN` | Se usar a plataforma de cadastro | Os mesmos da versão anterior. A DENIA envia clientes e atendimentos (serviço, prestador, valores, etapa) e só considera enviado quando a plataforma responde `ok: true` com `cliente_id` (e `os_id` para atendimentos). |
+| `CRM_CONSULTA_URL` e `CRM_TOKEN` | Opcional | Para a DENIA **ler** a ficha do cliente na plataforma (serviços feitos, valores). A DENIA chama `GET CRM_CONSULTA_URL?telefone=5521999999999` com `Authorization: Bearer CRM_TOKEN` e usa o JSON que voltar. Peça ao desenvolvedor da plataforma esse endereço. |
 | `EQUIPE_TELEFONES` | Recomendado | Telefones da equipe, separados por vírgula (ex.: `5521999990000,5521988880000`). Se o D1 cair, esses números nunca recebem resposta automática. |
 | `DENIA_PAUSADA` | Emergência | Coloque `true` para parar todos os envios automáticos. Apague para voltar. |
 | `MARKUP_PERCENT` | Opcional | Acréscimo quando o prestador diz que o valor é "só a parte dele". Padrão: 50. |
@@ -52,10 +54,11 @@ em dobro e o cron antigo continua consumindo a cota do D1.
 1. **Edit code** → apague todo o conteúdo → cole o conteúdo de `engine/worker.js`.
 2. **Deploy**.
 
-## Passo 5 — Conferir a saúde (1 min)
+## Passo 5 — Entrar e conferir a saúde (1 min)
 
-Abra `https://SEU-WORKER.workers.dev/api/saude`. O navegador pede usuário e senha:
-o usuário pode ser qualquer um; a senha é o `PAINEL_SENHA`.
+Abra `https://SEU-WORKER.workers.dev/login` e digite a senha que você colocou em `PAINEL_SENHA`.
+Se a página disser que o painel ainda não tem senha, falta criar o secret `PAINEL_SENHA` (Passo 2).
+Depois abra `https://SEU-WORKER.workers.dev/api/saude`.
 
 Precisa aparecer `"ok": true` e `"d1": { "operacional": true }`. Os outros campos mostram
 o que ainda falta configurar (Telegram, template, assinatura da Meta).
@@ -137,6 +140,18 @@ Worker → **Deployments** → escolha a versão anterior → **Rollback**. Ou c
 - **Relatório diário** às 20h no Telegram (e e-mail, se configurado), com casos parados e uma
   autoavaliação dos erros do dia.
 
+## Como ensinar quem atende o quê (roteamento)
+
+A DENIA escolhe o profissional pela **categoria**, decidida pela IA lendo o seu treinamento.
+Escreva no campo **SERVIÇOS** ou **REGRAS** do `/treinar` frases diretas, por exemplo:
+
+- "Eletricista (William) só faz elétrica da casa: tomadas, disjuntores, fiação. Não conserta eletrodomésticos."
+- "Aparelho que queimou por ligar no 220 V é conserto de aparelho, não é eletricista."
+- "Micro-ondas, air fryer e TV: a equipe avalia."
+
+Quando a IA não tiver certeza, ela **não** consulta ninguém: responde "Um momento, por favor."
+e avisa a equipe no Telegram.
+
 ## Onde editar
 
 - **Prestadores**: lista `PRESTADORES` no início do `worker.js` (telefone + área). A ordem define quem é consultado primeiro.
@@ -155,7 +170,7 @@ Worker → **Deployments** → escolha a versão anterior → **Rollback**. Ou c
 
 ## Testes
 
-`cd engine && npm test` roda 28 cenários: os do handoff e os erros relatados (repetição,
+`cd engine && npm test` roda 37 cenários: os do handoff e os erros relatados (repetição,
 reabertura, promessa sem ação, prestador como cliente, Carlos/Anderson, mistura de casos,
 "que cliente?", "Eita, Niterói", preço inventado, confirmação sem prestador, D1 fora do ar,
 treinamento, assinatura da Meta etc.). Os testes usam um D1 real (SQLite) e simulam Meta,

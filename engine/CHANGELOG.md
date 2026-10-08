@@ -1,5 +1,28 @@
 # Changelog — DENIA Engine
 
+## 30.2.0 — 2026-10-08
+
+### Corrigido
+- Eletrodoméstico/aparelho com defeito (inclusive queimado ao ligar em 110/220 V) nunca vai
+  para o eletricista. Ar, geladeira e lava e seca vão para a assistência técnica; outros
+  aparelhos (micro-ondas, air fryer, TV…) vão para a equipe decidir.
+- A categoria passa a ser decidida pela IA seguindo o TREINAMENTO; o código só confirma ou barra.
+  Se a IA não tiver certeza (confiança ALTA) ou discordar das regras, nenhum prestador é
+  consultado e a equipe é avisada.
+- Cliente antigo: o contexto inclui "cliente desde", atendimentos anteriores (com valores) e as
+  últimas 60 mensagens. A DENIA não trata cliente antigo como novo.
+- Valor: se o prestador mandar mais de um valor ("400 ou 500"), a DENIA pergunta o total antes
+  de passar ao cliente; se continuar ambíguo, nada vai ao cliente e a equipe é avisada.
+- A consulta ao prestador inclui as palavras do próprio cliente, para não haver distorção.
+- Painel: login por página com senha (PAINEL_SENHA, mínimo 8 caracteres) e sessão de 30 dias,
+  no lugar da janela de usuário/senha do navegador.
+
+### Novo
+- A DENIA imita o jeito das atendentes: usa como exemplo as mensagens reais que a equipe envia pelo app.
+- Integração com a plataforma de cadastro: envio de clientes e atendimentos para
+  PLATAFORMA_API_URL (mesmo contrato da versão anterior) e leitura da ficha do cliente em
+  CRM_CONSULTA_URL.
+
 ## 30.1.0 — 2026-10-07
 
 ### Corrigido (problemas relatados em produção)

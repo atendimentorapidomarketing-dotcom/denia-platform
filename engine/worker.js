@@ -35,8 +35,8 @@
 //       relatório diário. Nunca inicia conversa nova por conta própria.
 // ============================================================================
 
-const VERSAO = "30.1.0";
-const SCHEMA_VERSAO = "30.1.0-a";
+const VERSAO = "30.2.0";
+const SCHEMA_VERSAO = "30.2.0-a";
 const EMPRESA_ID = 1;
 const PHONE_ID_PADRAO = "473474732510163";
 const GRAPH = "v25.0";
@@ -47,7 +47,7 @@ const PAUSA_HUMANA_MS = 10 * 60 * 1000;
 const PAUSA_TAKEOVER_MS = 12 * 60 * 60 * 1000;
 const FILA_EXPIRA_MS = 15 * 60 * 1000;
 const AGENDADO_EXPIRA_MS = 16 * 60 * 60 * 1000;
-const HISTORICO_LIMITE = 40;
+const HISTORICO_LIMITE = 60;
 const HORA_INICIO_PRESTADOR = 8;
 const HORA_FIM_PRESTADOR = 21;
 const TEL_TESTE_CLIENTE = "0000000000000";
@@ -76,9 +76,10 @@ const PRESTADORES = [
 
 const CATEGORIAS = {
   MARCENARIA: { rotulo: "Marcenaria (móveis planejados/sob medida, armários, portas de madeira)", modo: "DOMICILIO" },
-  ASSISTENCIA_TECNICA: { rotulo: "Assistência técnica (ar-condicionado, geladeira, lava e seca)", modo: "DOMICILIO" },
+  ASSISTENCIA_TECNICA: { rotulo: "Assistência técnica de ar-condicionado, geladeira/freezer e lava e seca (inclusive aparelho queimado por ligar em 110/220 V)", modo: "DOMICILIO" },
+  ELETRODOMESTICO: { rotulo: "Conserto de outros eletrodomésticos e aparelhos (micro-ondas, air fryer, TV, forno, fogão, cafeteira, ventilador etc.) — sem prestador automático: a equipe avalia", modo: "EQUIPE" },
   REFORMA: { rotulo: "Reforma (pedreiro, pintura, hidráulica, pisos, revestimentos)", modo: "DOMICILIO" },
-  ELETRICA: { rotulo: "Elétrica (tomadas, disjuntores, fiação, iluminação)", modo: "DOMICILIO" },
+  ELETRICA: { rotulo: "Elétrica da casa (tomadas, disjuntores, fiação, quadro de luz, iluminação). NÃO conserta eletrodomésticos nem aparelhos queimados", modo: "DOMICILIO" },
   CHAVEIRO: { rotulo: "Chaveiro (fechaduras, cópias, abertura de portas)", modo: "DOMICILIO" },
   ESTOFADOR: { rotulo: "Estofador (reforma/troca de tecido de sofás e poltronas)", modo: "DOMICILIO" },
   HIGIENIZACAO: { rotulo: "Higienização (limpeza de sofás, colchões, tapetes, estofados)", modo: "DOMICILIO" },
@@ -94,6 +95,10 @@ const REGRAS_AREA = [
   ["MARCENARIA", /\b(marcenaria|marceneiro|moveis? planejad\w*|planejad[oa]s?|sob medida|armarios?|guarda[- ]roupas?|mdf|gabinete|prateleiras?|nichos?)\b/],
   ["BALCAO", /\b(notebook|computador|macbook|imac|iphone|ipad|celular|smartwatch|apple watch|relogio inteligente|placa mae|formatar|formatacao)\b/]
 ];
+// Aparelho/eletrodoméstico: nunca vai para o eletricista, mesmo que fale em tomada, 110/220 V ou "queimou".
+const REGRA_APARELHO = /\b(eletrodomestic\w*|aparelho|micro-?ondas|microondas|liquidificador|air ?fryer|fritadeira|forno|fogao|cooktop|cafeteira|torradeira|ventilador|aspirador|batedeira|panela eletrica|purificador|bebedouro|televis\w*|tv|smart ?tv|secador|chapinha|geladeira|freezer|refrigerador|lava e seca|lava-e-seca|lavadora|maquina de lavar|secadora|ar[- ]?condicionado|split|notebook|computador|celular|videogame)\b/;
+const REGRA_DEFEITO = /\b(queim\w*|parou|para de|nao liga|nao funciona|nao gela|nao esquenta|nao centrifuga|defeito|quebr\w*|estrag\w*|conserto|consertar|reparo|reparar|pifou|deu problema|com problema|curto|fumaca|cheiro de queimado|(?:110|127|220) ?v?|voltagem)\b/;
+const REGRA_ASSISTENCIA = /\b(ar[- ]?condicionado|split|geladeiras?|refrigerador|freezer|lava e seca|lava-e-seca|lavadora|maquina de lavar|secadora)\b/;
 const REGRA_REFORMA = /\b(reforma|pedreiro|pintura|pintor|hidraulic\w*|encanador|vazamento|drywall|alvenaria|azulejo|piso|porcelanato|revestimento|obra|reboco|rejunte|infiltracao)\b/;
 
 const ETAPAS_ENCERRADAS = new Set(["CONCLUIDO", "CANCELADO"]);
@@ -181,14 +186,27 @@ function classificarArea(texto) {
   const areas = REGRAS_AREA.filter(([, re]) => re.test(t)).map(([a]) => a);
   return { areas: [...new Set(areas)], generico: REGRA_REFORMA.test(t) };
 }
-function definirCategoria(fatos, sugestaoIA) {
+// A IA escolhe a categoria lendo o TREINAMENTO; o código só confirma ou barra.
+// Na dúvida, devolve "" e o caso vai para a equipe — nunca para o prestador errado.
+function definirCategoria(fatos, sugestaoIA, confianca = "") {
   const base = [fatos.servico, fatos.problema, fatos.marca, fatos.modelo].filter(Boolean).join(" | ");
+  const t = norm(base);
   const r = classificarArea(base);
-  const ia = CATEGORIAS[sugestaoIA] ? sugestaoIA : "";
-  if (r.areas.length === 1) return r.areas[0];
-  if (r.areas.length > 1) return r.areas.includes(ia) ? ia : "";
-  if (r.generico) return ia || "REFORMA";
-  return ia;
+  let areas = r.areas;
+  let ia = CATEGORIAS[sugestaoIA] ? sugestaoIA : "";
+  const certa = String(confianca || "").toUpperCase() === "ALTA";
+  if (REGRA_APARELHO.test(t) && REGRA_DEFEITO.test(t)) {
+    areas = areas.filter(a => a !== "ELETRICA");
+    if (ia === "ELETRICA") ia = "";
+    if (!areas.length && !REGRA_ASSISTENCIA.test(t)) areas = ["ELETRODOMESTICO"];
+  }
+  if (areas.length === 1) {
+    if (ia && ia !== areas[0] && certa) return ""; // IA e regras discordam: equipe decide
+    return areas[0];
+  }
+  if (areas.length > 1) return areas.includes(ia) && certa ? ia : "";
+  if (r.generico) return ia && certa ? ia : (ia ? "" : "REFORMA");
+  return certa ? ia : "";
 }
 
 // Valores em reais escritos no texto -> centavos.
@@ -200,6 +218,21 @@ function valoresNoTexto(texto) {
     const reais = Number(m[1].replace(/\./g, ""));
     const cent = m[2] ? Number(m[2].padEnd(2, "0")) : 0;
     if (Number.isFinite(reais)) out.push(reais * 100 + cent);
+  }
+  return out;
+}
+// Números que parecem dinheiro (exclui horários, datas e números de caso).
+function valoresCandidatos(texto) {
+  const out = [];
+  const re = /(r\$\s*)?(\d{1,3}(?:\.\d{3})+|\d+)(?:,(\d{1,2}))?(\s*(?:h\b|hs\b|horas?|:|min|º|°|\/|%))?/gi;
+  let m;
+  const s = String(texto || "");
+  while ((m = re.exec(s))) {
+    if (m[4]) continue;
+    const antes = norm(s.slice(Math.max(0, m.index - 6), m.index));
+    if (/(dia|caso|#|n|num)\s*$/.test(antes)) continue;
+    const v = Number(m[2].replace(/\./g, "")) * 100 + (m[3] ? Number(m[3].padEnd(2, "0")) : 0);
+    if (v >= 2000 && v <= 10000000) out.push(v);
   }
   return out;
 }
@@ -266,7 +299,10 @@ const SQL_SCHEMA = [
   `CREATE INDEX IF NOT EXISTS d30_eventos_ms ON d30_eventos(criado_ms)`,
   `CREATE TABLE IF NOT EXISTS d30_saidas (id INTEGER PRIMARY KEY AUTOINCREMENT, telefone TEXT NOT NULL, criado_ms INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS d30_saidas_tel ON d30_saidas(telefone, criado_ms)`,
-  `CREATE INDEX IF NOT EXISTS d30_saidas_ms ON d30_saidas(criado_ms)`
+  `CREATE INDEX IF NOT EXISTS d30_saidas_ms ON d30_saidas(criado_ms)`,
+  `CREATE TABLE IF NOT EXISTS d30_crm (telefone TEXT PRIMARY KEY, json TEXT NOT NULL, em_ms INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS d30_sync (chave TEXT PRIMARY KEY, evento TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDENTE', tentativas INTEGER NOT NULL DEFAULT 0, proxima_ms INTEGER NOT NULL DEFAULT 0, erro TEXT, atualizado_ms INTEGER NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS d30_sync_status ON d30_sync(status, proxima_ms)`
 ];
 const SQL_INDICES_LEGADO = [
   `CREATE INDEX IF NOT EXISTS d30_idx_msg_pessoa ON mensagens(empresa_id, pessoa_id, id)`,
@@ -274,7 +310,9 @@ const SQL_INDICES_LEGADO = [
   `CREATE INDEX IF NOT EXISTS d30_idx_pessoas_tel ON pessoas(empresa_id, telefone)`,
   `CREATE INDEX IF NOT EXISTS d30_idx_casos_cliente ON casos(empresa_id, cliente_id, id)`,
   `CREATE INDEX IF NOT EXISTS d30_idx_atend_pessoa ON atendentes(empresa_id, pessoa_id)`,
-  `CREATE INDEX IF NOT EXISTS d30_idx_tec_pessoa ON tecnicos(empresa_id, pessoa_id)`
+  `CREATE INDEX IF NOT EXISTS d30_idx_tec_pessoa ON tecnicos(empresa_id, pessoa_id)`,
+  `CREATE INDEX IF NOT EXISTS d30_idx_msg_origem ON mensagens(origem, id)`,
+  `CREATE INDEX IF NOT EXISTS d30_idx_msg_caso ON mensagens(caso_id, id)`
 ];
 
 let schemaPronto = false;
@@ -312,7 +350,7 @@ async function liberarChave(c, chave) {
 
 async function buscarPessoa(c, tel) {
   const vs = variantesTel(tel);
-  return await c.db.prepare(`SELECT id,nome,telefone,tipo FROM pessoas WHERE empresa_id=? AND telefone IN (${vs.map(() => "?").join(",")}) AND COALESCE(ativo,1)=1 ORDER BY id LIMIT 1`)
+  return await c.db.prepare(`SELECT id,nome,telefone,tipo,email,criado_em FROM pessoas WHERE empresa_id=? AND telefone IN (${vs.map(() => "?").join(",")}) AND COALESCE(ativo,1)=1 ORDER BY id LIMIT 1`)
     .bind(EMPRESA_ID, ...vs).first();
 }
 async function obterPessoa(c, tel, nome, tipo) {
@@ -323,11 +361,114 @@ async function obterPessoa(c, tel, nome, tipo) {
         .bind(EMPRESA_ID, txt(nome, 120) || null, digitos(tel), tipo).run();
     } catch (e) { console.warn("pessoa concorrente", e?.message); }
     p = await buscarPessoa(c, tel);
+    if (p && tipo === "CLIENTE") await syncCliente(c, p);
   } else if (!p.nome && nome) {
     await c.db.prepare("UPDATE pessoas SET nome=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?").bind(txt(nome, 120), p.id).run();
     p.nome = txt(nome, 120);
   }
   return p;
+}
+
+// Perfil do cliente antigo: desde quando, quantos atendimentos, últimos serviços e valores.
+async function perfilCliente(c, pessoa) {
+  try {
+    const casos = (await c.db.prepare("SELECT id,titulo,problema,bairro,status,criado_em FROM casos WHERE empresa_id=? AND cliente_id=? ORDER BY id DESC LIMIT 8").bind(EMPRESA_ID, pessoa.id).all())?.results || [];
+    const total = Number((await c.db.prepare("SELECT COUNT(*) n FROM casos WHERE empresa_id=? AND cliente_id=?").bind(EMPRESA_ID, pessoa.id).first())?.n || 0);
+    let valores = new Map();
+    if (casos.length) {
+      const ids = casos.map(k => k.id);
+      const f = await c.db.prepare(`SELECT caso_id, valor_cliente_centavos FROM financeiro_casos WHERE caso_id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all().catch(() => ({ results: [] }));
+      for (const x of f?.results || []) if (x.valor_cliente_centavos) valores.set(x.caso_id, x.valor_cliente_centavos);
+      const d = await c.db.prepare(`SELECT caso_id, valor_cliente FROM d30_consultas WHERE caso_id IN (${ids.map(() => "?").join(",")}) AND valor_cliente IS NOT NULL`).bind(...ids).all().catch(() => ({ results: [] }));
+      for (const x of d?.results || []) valores.set(x.caso_id, x.valor_cliente);
+    }
+    const linhas = [];
+    if (pessoa.criado_em) linhas.push(`Cliente desde ${String(pessoa.criado_em).slice(0, 10).split("-").reverse().join("/")}.`);
+    linhas.push(total ? `${total} atendimento(s) registrado(s).` : "Nenhum atendimento anterior registrado.");
+    for (const k of casos) linhas.push(`- #${k.id} ${String(k.criado_em || "").slice(0, 10)}: ${txt(k.titulo || k.problema, 80)}${k.bairro ? ", " + k.bairro : ""} — ${k.status || "-"}${valores.has(k.id) ? " — " + moeda(valores.get(k.id)) : ""}`);
+    return linhas.join("\n");
+  } catch (e) { console.warn("perfil", e?.message); return ""; }
+}
+
+// Exemplos reais de como as atendentes escrevem (para a DENIA falar igual).
+let cacheEstilo = { em: 0, valor: "" };
+async function estiloDaEquipe(c) {
+  if (c.agora() - cacheEstilo.em < 30 * 60000) return cacheEstilo.valor;
+  try {
+    const r = (await c.db.prepare("SELECT conteudo FROM mensagens WHERE origem='HUMANO' AND direcao='SAIDA' ORDER BY id DESC LIMIT 40").all())?.results || [];
+    const ex = r.map(x => ocultarTelefones(txt(x.conteudo, 220))).filter(t => t.length >= 8 && !/^\[/.test(t) && !/r\$|\d{3}\.\d{3}/i.test(t)).slice(0, 15);
+    cacheEstilo = { em: c.agora(), valor: ex.map(t => "- " + t).join("\n") };
+  } catch (e) { cacheEstilo = { em: c.agora(), valor: "" }; }
+  return cacheEstilo.valor;
+}
+
+// Ficha do cliente no sistema de cadastro (CRM). Contrato: GET CRM_CONSULTA_URL?telefone=55DDDNUMERO
+// com "Authorization: Bearer CRM_TOKEN", resposta JSON livre (serviços feitos, valores, observações).
+async function fichaCRM(c, tel) {
+  const url = String(c.env.CRM_CONSULTA_URL || "").trim();
+  if (c.sim || !/^https:\/\//i.test(url)) return "";
+  const t = digitos(tel);
+  try {
+    const cache = await c.db.prepare("SELECT json, em_ms FROM d30_crm WHERE telefone=?").bind(t).first();
+    if (cache && c.agora() - cache.em_ms < 6 * 3600000) return cache.json;
+    const u = new URL(url); u.searchParams.set("telefone", t);
+    const r = await fetch(u.toString(), { headers: { Authorization: `Bearer ${c.env.CRM_TOKEN || c.env.PLATAFORMA_API_TOKEN || ""}`, Accept: "application/json" }, signal: AbortSignal.timeout(4000) });
+    if (!r.ok) return cache?.json || "";
+    const corpo = JSON.stringify(await r.json()).slice(0, 3500);
+    await c.db.prepare("INSERT OR REPLACE INTO d30_crm(telefone,json,em_ms) VALUES(?,?,?)").bind(t, corpo, c.agora()).run();
+    return corpo;
+  } catch (e) { console.warn("CRM", e?.message); return ""; }
+}
+
+// Sincronização com a plataforma de cadastro (mesmo contrato da versão anterior:
+// PLATAFORMA_API_URL + PLATAFORMA_API_TOKEN; resposta precisa de ok/sucesso=true e cliente_id/os_id).
+async function enfileirarSync(c, chave, evento, payload) {
+  if (c.sim || !/^https:\/\//i.test(String(c.env.PLATAFORMA_API_URL || ""))) return;
+  const corpo = JSON.stringify(payload);
+  try {
+    await c.db.prepare(`INSERT INTO d30_sync(chave,evento,payload,status,tentativas,proxima_ms,atualizado_ms) VALUES(?,?,?,'PENDENTE',0,0,?)
+      ON CONFLICT(chave) DO UPDATE SET evento=excluded.evento, payload=excluded.payload, status='PENDENTE', tentativas=0, proxima_ms=0, erro=NULL, atualizado_ms=excluded.atualizado_ms
+      WHERE d30_sync.payload<>excluded.payload`).bind(chave, evento, corpo, c.agora()).run();
+  } catch (e) { console.warn("sync", e?.message); }
+}
+async function syncCliente(c, pessoa) {
+  if (!pessoa?.id) return;
+  await enfileirarSync(c, "cli:" + pessoa.id, "CLIENTE_ATUALIZADO", { versao: 1, evento: "CLIENTE_ATUALIZADO", empresa_id: String(EMPRESA_ID), cliente: { id: pessoa.id, nome: pessoa.nome || null, telefone: digitos(pessoa.telefone), email: pessoa.email || null } });
+}
+async function syncCaso(c, caso) {
+  if (c.sim || !c.env.PLATAFORMA_API_URL) return;
+  const p = await c.db.prepare("SELECT id,nome,telefone,email FROM pessoas WHERE id=?").bind(caso.clienteId).first().catch(() => null);
+  const k = await c.db.prepare("SELECT * FROM d30_consultas WHERE caso_id=? ORDER BY id DESC LIMIT 1").bind(caso.casoId).first().catch(() => null);
+  const f = caso.fatos || {};
+  const ev = caso.etapa === "AGENDADO" ? "AGENDAMENTO_CONFIRMADO" : caso.etapa === "AGUARDANDO_CLIENTE" ? "ORCAMENTO_RECEBIDO_PROFISSIONAL" : "ATUALIZACAO";
+  await enfileirarSync(c, "os:" + caso.casoId, ev, {
+    versao: 1, evento: ev, empresa_id: String(EMPRESA_ID),
+    cliente: { id: caso.clienteId, nome: p?.nome || null, telefone: digitos(p?.telefone || caso.telefone), email: p?.email || null },
+    atendimento: { id: caso.casoId, status: statusLegado(caso.etapa), titulo: f.servico || null, descricao: f.problema || null, problema: f.problema || null, marca: f.marca || null, modelo: f.modelo || null, endereco: f.endereco || null, bairro: f.bairro || null, cidade: f.cidade || null, estado: null, resumo: caso.resumo || null },
+    servico: { id: null, nome: CATEGORIAS[f.categoria]?.rotulo.split(" (")[0] || f.servico || null },
+    profissional: k ? { id: k.prestador_id, nome: k.prestador_nome, telefone: prestadorPorTelefone(k.prestador_tel)?.telefone || null, status: k.status, disponibilidade: k.disponibilidade || null } : null,
+    financeiro: { valor_profissional_centavos: k?.valor_prestador ?? null, valor_cliente_centavos: k?.valor_cliente ?? null, valor_inclui_atendimento: k?.valor_final || null, pagamento_cliente_status: "PENDENTE", repasse_profissional_status: "PENDENTE" }
+  });
+}
+async function processarSync(c) {
+  const url = String(c.env.PLATAFORMA_API_URL || "");
+  if (!/^https:\/\//i.test(url)) return;
+  const itens = (await c.db.prepare("SELECT * FROM d30_sync WHERE status='PENDENTE' AND proxima_ms <= ? ORDER BY proxima_ms LIMIT 10").bind(c.agora()).all())?.results || [];
+  for (const it of itens) {
+    let erro = "";
+    try {
+      const corpo = JSON.stringify({ ...JSON.parse(it.payload), gerado_em: new Date(c.agora()).toISOString() });
+      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${c.env.PLATAFORMA_API_TOKEN || ""}`, "X-Oficina-Event": it.evento, "Idempotency-Key": `${EMPRESA_ID}:${it.chave}:${(await hmacHex("sync", it.payload)).slice(0, 32)}` }, body: corpo, signal: AbortSignal.timeout(15000) });
+      const a = await r.json().catch(() => null);
+      const ok = r.ok && (a?.ok === true || a?.sucesso === true || a?.success === true) && (a?.cliente_id ?? a?.cliente?.id) != null && (it.chave.startsWith("cli:") || (a?.os_id ?? a?.ordem_servico?.id) != null);
+      if (!ok) erro = `HTTP ${r.status}: a plataforma não confirmou (precisa ok=true, cliente_id${it.chave.startsWith("os:") ? " e os_id" : ""}).`;
+    } catch (e) { erro = txt(e?.message, 200); }
+    if (!erro) { await c.db.prepare("UPDATE d30_sync SET status='ENVIADO', erro=NULL, atualizado_ms=? WHERE chave=? AND payload=?").bind(c.agora(), it.chave, it.payload).run(); continue; }
+    const n = Number(it.tentativas) + 1;
+    await c.db.prepare("UPDATE d30_sync SET tentativas=?, status=?, erro=?, proxima_ms=?, atualizado_ms=? WHERE chave=? AND payload=?")
+      .bind(n, n >= 10 ? "ERRO" : "PENDENTE", erro, c.agora() + Math.min(360, 5 * 2 ** Math.min(n, 6)) * 60000, c.agora(), it.chave, it.payload).run();
+    if (n >= 10) await alertarEquipe(c, `Não consegui atualizar a plataforma de cadastro (${it.chave}): ${erro}`, "sync-erro:" + it.chave);
+  }
 }
 
 // Ordem de precedência: lista oficial de prestadores > equipe (atendentes) > técnico do D1 > cliente.
@@ -436,6 +577,7 @@ async function criarCaso(c, pessoa, fatos) {
     .bind(caso.casoId, pessoa.id, pessoa.telefone, caso.etapa, JSON.stringify(f), "", caso.criadoMs, caso.atualizadoMs).run();
   await evento(c, caso.casoId, "CASO_CRIADO", f.servico || "", f);
   await salvarSnapshotKV(c, caso);
+  await syncCaso(c, caso);
   return caso;
 }
 async function salvarCaso(c, caso, etapaAnterior) {
@@ -453,6 +595,7 @@ async function salvarCaso(c, caso, etapaAnterior) {
     await evento(c, caso.casoId, "ETAPA", `${etapaAnterior} -> ${caso.etapa}`);
     await salvarSnapshotKV(c, caso);
   }
+  await syncCaso(c, caso);
 }
 async function mudarEtapa(c, caso, etapa) { const ant = caso.etapa; caso.etapa = etapa; await salvarCaso(c, caso, ant); }
 
@@ -948,28 +1091,40 @@ SEU PAPEL: você interpreta as mensagens e redige a resposta. Você NÃO executa
 - Cancelamentos e reclamações: não decida; seja cordial e marque precisa_humano.
 - Se não souber algo, não invente: diga "Um momento, por favor." e marque precisa_humano.
 
+CLIENTE ANTIGO: veja o PERFIL DO CLIENTE e a FICHA NO SISTEMA. Se ele já foi atendido antes, trate-o como cliente conhecido: nunca como novo, não peça dados que já constam e lembre do que já foi feito quando for útil. Dados da FICHA são oficiais; nunca os contradiga e nunca os invente.
+
 MEMÓRIA: o HISTÓRICO pode conter mensagens de outros casos do mesmo cliente (marcadas com #número); use as do caso ativo e só fale de outro caso se o cliente se referir a ele. Leia o ESTADO DO CASO, os FATOS e o HISTÓRICO antes de responder. Nunca pergunte algo que já está nos fatos ou no histórico. A informação mais recente vale mais. Uma resposta curta normalmente responde à última pergunta feita. Mensagens do ATENDENTE HUMANO fazem parte da conversa: continue de onde ele parou, sem repetir o que já foi combinado. Se o caso está AGENDADO ou concluído, não recomece a coleta; só é pedido novo quando o cliente pede claramente outro serviço.
 
-ESTILO: português do Brasil; atendente experiente, cordial, natural e objetivo; responda primeiro ao que o cliente perguntou; 1 ou 2 frases curtas; no máximo uma pergunta; retribua cumprimentos; não repita o nome do cliente, o bairro nem o que ele acabou de dizer; sem listas, sem markdown; nunca seco ou grosseiro; não mencione sistema, banco de dados ou modelo de IA. Se perguntarem quem é você: "Sou a assistente virtual responsável pelo atendimento digital."
+ESTILO: escreva como as atendentes da equipe (veja COMO A EQUIPE FALA): humana, gentil e com empatia — se o cliente está com um problema, mostre que entende ("Poxa, imagino o transtorno") sem exagero; português do Brasil natural; responda primeiro ao que o cliente perguntou; mensagens CURTAS, 1 ou 2 frases; no máximo uma pergunta; retribua cumprimentos; não repita o nome do cliente, o bairro nem o que ele acabou de dizer; sem listas, sem markdown; nunca seco ou grosseiro; não mencione sistema, banco de dados ou modelo de IA. Se perguntarem quem é você: "Sou a assistente virtual responsável pelo atendimento digital."
 
 COMO O SISTEMA AGE: quando o serviço está claro e o cliente quer orçamento, visita ou atendimento, o sistema consulta sozinho o profissional da categoria e avisa o cliente. Para isso basta preencher os fatos, quer_orcamento_ou_atendimento=true e pronto_para_profissional=true. Não é preciso bairro nem endereço para consultar.
 
 Responda SOMENTE com um objeto JSON neste formato:
-{"resposta":"","intencao":"CONVERSA","novo_pedido":false,"quer_orcamento_ou_atendimento":false,"pronto_para_profissional":false,"fatos":{"servico":"","categoria":"","problema":"","marca":"","modelo":"","bairro":"","cidade":"","endereco":"","preferencia_horario":"","nome":""},"resposta_para_profissional":"","descricao_anexos":"","comprovante_pagamento":false,"precisa_humano":false,"motivo_humano":"","resumo_caso":""}
+{"resposta":"","intencao":"CONVERSA","novo_pedido":false,"quer_orcamento_ou_atendimento":false,"pronto_para_profissional":false,"fatos":{"servico":"","categoria":"","problema":"","marca":"","modelo":"","bairro":"","cidade":"","endereco":"","preferencia_horario":"","nome":""},"categoria_confianca":"BAIXA","resposta_para_profissional":"","descricao_anexos":"","comprovante_pagamento":false,"precisa_humano":false,"motivo_humano":"","resumo_caso":""}
 
 intencao: CONVERSA | NOVO_PEDIDO | ACEITA_PROPOSTA | RECUSA_PROPOSTA | PEDE_OUTRO_HORARIO | PEDE_ALTERACAO | PEDE_CANCELAMENTO | PERGUNTA_STATUS | AGRADECIMENTO | FALAR_COM_HUMANO.
 - ACEITA_PROPOSTA/RECUSA_PROPOSTA/PEDE_OUTRO_HORARIO: só quando o cliente responde à proposta enviada (etapa AGUARDANDO_CLIENTE).
 - PEDE_ALTERACAO: pedido de mudança em atendimento já combinado (ex.: chegar mais tarde, mudar o dia).
 - novo_pedido=true somente se o cliente pede um serviço DIFERENTE do caso ativo.
-- fatos: apenas o que foi informado nas mensagens novas (ou correção); deixe "" o que não mudou. categoria: uma das CATEGORIAS ou "".
+- fatos: apenas o que foi informado nas mensagens novas (ou correção); deixe "" o que não mudou.
+- categoria: uma das CATEGORIAS, escolhida seguindo o TREINAMENTO DA EMPRESA (o treinamento manda). Aparelho ou eletrodoméstico com defeito (inclusive queimado por ligar em 110/220 V) NUNCA é ELETRICA. categoria_confianca: ALTA só quando não há nenhuma dúvida; senão MEDIA ou BAIXA (o caso vai para a equipe, sem errar o profissional).
 - pronto_para_profissional: true quando já se sabe o que precisa ser feito e em qual item, o suficiente para um profissional dar valor e disponibilidade.
 - resposta_para_profissional: preencha quando houver PERGUNTA DO PROFISSIONAL PENDENTE e as mensagens novas a respondem, ou quando a intencao for PEDE_ALTERACAO; texto objetivo, sem dados pessoais.
 - descricao_anexos: descrição objetiva das imagens/documentos anexados (leia textos visíveis). Se for comprovante de pagamento, comprovante_pagamento=true (isso não confirma o pagamento).
 - resumo_caso: 1 ou 2 frases atualizadas sobre o caso ativo.`;
 
-function montarEntradaCliente({ agora = Date.now(), treinamento, caso, consulta, autorizados, recentes, hist, novas, temAnexos, pessoa }) {
-  return `TREINAMENTO DA EMPRESA:
+function montarEntradaCliente({ agora = Date.now(), treinamento, caso, consulta, autorizados, recentes, hist, novas, temAnexos, pessoa, perfil = "", estilo = "", ficha = "" }) {
+  return `TREINAMENTO DA EMPRESA (siga sempre):
 ${formatarTreinamento(treinamento.dados)}
+
+COMO A EQUIPE FALA (mensagens reais das atendentes; imite o tom e o tamanho, não o conteúdo):
+${estilo || "(sem exemplos ainda)"}
+
+PERFIL DO CLIENTE:
+${perfil || "(cliente sem atendimentos anteriores registrados)"}
+
+FICHA NO SISTEMA DE CADASTRO (dados oficiais):
+${ficha || "(não disponível)"}
 
 CATEGORIAS:
 ${Object.entries(CATEGORIAS).map(([k, v]) => `${k}: ${v.rotulo}`).join("\n")}
@@ -1031,7 +1186,7 @@ function normalizarDecisaoCliente(o) {
   if (fatos.categoria && !CATEGORIAS[fatos.categoria]) delete fatos.categoria;
   const intencao = intencoes.includes(String(o?.intencao).toUpperCase()) ? String(o.intencao).toUpperCase() : "CONVERSA";
   return {
-    resposta: txt(o?.resposta, 900), intencao, fatos,
+    resposta: txt(o?.resposta, 900), intencao, fatos, confianca: String(o?.categoria_confianca || "").toUpperCase(),
     novo_pedido: o?.novo_pedido === true, quer: o?.quer_orcamento_ou_atendimento === true, pronto: o?.pronto_para_profissional === true,
     resposta_para_profissional: txt(o?.resposta_para_profissional, 600), descricao_anexos: txt(o?.descricao_anexos, 1500),
     comprovante: o?.comprovante_pagamento === true, precisa_humano: o?.precisa_humano === true, motivo_humano: txt(o?.motivo_humano, 300),
@@ -1087,10 +1242,11 @@ async function processarCliente(c, tel, id, msgs, { apenasRegistrar, chaveLote }
   let autorizados = await autorizadosParaCaso(c, consulta);
   const treinamento = await carregarTreinamento(c);
   const novas = msgs.map(m => `- ${m.conteudo || "(vazio)"}`).join("\n");
+  const [perfil, estilo, ficha] = await Promise.all([perfilCliente(c, pessoa), estiloDaEquipe(c), fichaCRM(c, tel)]);
 
   let d;
   try {
-    const bruto = await openaiJSON(c, INSTRUCOES_CLIENTE, montarEntradaCliente({ agora: c.agora(), treinamento, caso, consulta, autorizados, recentes, hist: formatarHistorico(hist, "CLIENTE", novasIds), novas, temAnexos: anexos.length > 0, pessoa }), anexos);
+    const bruto = await openaiJSON(c, INSTRUCOES_CLIENTE, montarEntradaCliente({ agora: c.agora(), treinamento, caso, consulta, autorizados, recentes, hist: formatarHistorico(hist, "CLIENTE", novasIds), novas, temAnexos: anexos.length > 0, pessoa, perfil, estilo, ficha }), anexos);
     d = normalizarDecisaoCliente(bruto);
     capturarRespostaCurta(d, msgs, hist);
   } catch (e) {
@@ -1114,7 +1270,7 @@ async function processarCliente(c, tel, id, msgs, { apenasRegistrar, chaveLote }
   }
   if (d.fatos.nome && !pessoa.nome) await c.db.prepare("UPDATE pessoas SET nome=? WHERE id=?").bind(d.fatos.nome, pessoa.id).run();
   if (caso) {
-    if (!(consulta && caso.fatos.categoria)) caso.fatos.categoria = definirCategoria(caso.fatos, d.fatos.categoria);
+    if (!(consulta && caso.fatos.categoria)) caso.fatos.categoria = definirCategoria(caso.fatos, d.fatos.categoria, d.confianca);
     if (d.resumo) caso.resumo = d.resumo;
     await salvarCaso(c, caso);
   }
@@ -1210,7 +1366,7 @@ async function consultarPrestador(c, caso, pessoa, chaveLote) {
     return null;
   }
   if (!area) {
-    await alertarEquipe(c, `Não identifiquei a categoria do caso #${caso.casoId} (${caso.fatos.servico || caso.fatos.problema}). Nenhum prestador foi consultado.`, "semcat:" + caso.casoId, caso.casoId);
+    await alertarEquipe(c, `Caso #${caso.casoId} (${nomeCli}): não tenho certeza de qual profissional atende "${txt(caso.fatos.servico || caso.fatos.problema, 120)}". Nenhum prestador foi consultado — a equipe decide.`, "semcat:" + caso.casoId, caso.casoId);
     return null;
   }
   if (await consultaDoCaso(c, caso.casoId)) return null; // nunca duplicar consulta
@@ -1225,10 +1381,13 @@ async function consultarPrestador(c, caso, pessoa, chaveLote) {
   const ins = await c.db.prepare(`INSERT INTO d30_consultas(caso_id,cliente_id,cliente_tel,prestador_id,prestador_tel,prestador_nome,area,status,criado_ms,atualizado_ms)
     VALUES(?,?,?,?,?,?,?,'ENVIANDO',?,?) RETURNING *`).bind(caso.casoId, pessoa.id, caso.telefone, p.id, telefoneDestinoPrestador(c, p), p.nome, area, agora, agora).first();
   const f = caso.fatos;
+  const falas = ((await c.db.prepare("SELECT conteudo FROM mensagens WHERE caso_id=? AND direcao='ENTRADA' ORDER BY id DESC LIMIT 4").bind(caso.casoId).all())?.results || [])
+    .map(x => ocultarTelefones(txt(x.conteudo, 200))).filter(t => t && !ehMensagemSocial(t)).reverse();
   const linhas = [
     `Olá, ${primeiroNome(p.nome)}! Aqui é a Central de Atendimento.`,
     `Caso #${caso.casoId} — ${CATEGORIAS[area].rotulo.split(" (")[0]}`,
     `Solicitação: ${f.problema || f.servico}`,
+    falas.length ? `Nas palavras do cliente: "${falas.join(" / ")}"` : "",
     f.marca || f.modelo ? `Marca/modelo: ${[f.marca, f.modelo].filter(Boolean).join(" ")}` : "",
     f.bairro ? `Local: ${[f.bairro, f.cidade].filter(Boolean).join(", ")}` : "",
     `Você realiza esse serviço${f.bairro ? " e atende essa região" : ""}? Se sim, por favor informe o valor (e se é o valor final para o cliente ou só a sua parte) e sua disponibilidade.`
@@ -1363,6 +1522,17 @@ async function tratarRespostaPrestador(c, { caso, consulta, d, textoTodo, chaveL
   if (consulta.status === "AGUARDANDO_COMPOSICAO" && finalInf && !["RECUSA", "PEDE_CONTEXTO"].includes(tipo)) tipo = "ACEITA";
   if (caso.etapa === "AGUARDANDO_CONFIRMACAO_PRESTADOR" && tipo === "COMENTARIO" && /\b(confirmad[oa]|confirmo|fechado|combinado|pode deixar|ok)\b/.test(norm(textoTodo))) tipo = "CONFIRMA_AGENDAMENTO";
   if (d?.atende_regiao === "SIM") { caso.fatos.regiao_confirmada = "SIM"; await salvarCaso(c, caso); }
+  // Mais de um valor na mesma mensagem (ex.: "400 ou 500", "visita 80 e serviço 300"): confirmar antes de passar.
+  const candidatos = [...new Set(valoresCandidatos(textoTodo))];
+  if (candidatos.length > 1 && ["ACEITA", "CONFIRMA_AGENDAMENTO"].includes(tipo) && caso.etapa !== "AGUARDANDO_CONFIRMACAO_PRESTADOR") {
+    if (!(await reservarChave(c, "multivalor:" + consulta.id))) {
+      await alertarEquipe(c, `${consulta.prestador_nome} (caso #${caso.casoId}) informou valores que não consegui confirmar com certeza: "${txt(textoTodo, 250)}". Nada foi passado ao cliente — confirme manualmente.`, "valor-incerto:" + consulta.id, caso.casoId);
+      return;
+    }
+    await atualizarConsulta(c, consulta.id, { status: "AGUARDANDO_COMPOSICAO", valor_prestador: null, disponibilidade: disp || consulta.disponibilidade });
+    await responder(`Para eu passar ao cliente sem erro: qual é o valor TOTAL do serviço (${candidatos.map(moeda).join(" ou ")}…)? E ele é o valor final para o cliente ou só a sua parte?`, "multivalor");
+    return;
+  }
 
   if (tipo === "PEDE_CONTEXTO") { await responder(resumoParaPrestador(caso, consulta), "ctx"); return; }
 
@@ -1705,6 +1875,7 @@ async function cron(c) {
   const tels = (await c.db.prepare("SELECT DISTINCT telefone FROM d30_fila WHERE status='PENDENTE' AND recebido_ms < ? LIMIT 10").bind(agora - 40000).all())?.results || [];
   for (const t of tels) await processarPendentes(c, t.telefone);
   await processarAgendados(c);
+  await processarSync(c).catch(e => console.error("sync", e));
   await relatorioDiario(c).catch(e => console.error("relatório", e));
   const dia = dataSP(agora);
   if (await reservarChave(c, "limpeza:" + dia)) {
@@ -1870,7 +2041,7 @@ async function saude(c) {
     openai_configurado: Boolean(env.OPENAI_API_KEY), whatsapp_configurado: Boolean(env.WHATSAPP_TOKEN),
     verify_token_configurado: Boolean(env.WHATSAPP_VERIFY_TOKEN), assinatura_meta_verificada: Boolean(env.META_APP_SECRET),
     telegram_configurado: Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID), template_prestador_configurado: Boolean(env.WHATSAPP_TEMPLATE_CONSULTA_TECNICO),
-    painel_protegido: String(env.PAINEL_SENHA || "").length >= 12, janela_agrupamento_ms: janela(env), markup_percent: Number(env.MARKUP_PERCENT ?? 50)
+    painel_protegido: Boolean(senhaPainel(env)), plataforma_cadastro_envio: Boolean(env.PLATAFORMA_API_URL), plataforma_cadastro_consulta: Boolean(env.CRM_CONSULTA_URL), janela_agrupamento_ms: janela(env), markup_percent: Number(env.MARKUP_PERCENT ?? 50)
   };
   try { await c.db.prepare("SELECT 1 AS ok").first(); r.d1 = { configurado: true, operacional: true }; }
   catch (e) { r.d1 = { configurado: Boolean(env.DB), operacional: false, erro: txt(e?.message, 200) }; }
@@ -1894,17 +2065,43 @@ async function saude(c) {
 // PAINÉIS (protegidos por senha: secret PAINEL_SENHA)
 // ============================================================================
 
-function painelAutorizado(request, env) {
-  const senha = String(env.PAINEL_SENHA || "");
-  if (senha.length < 12) return false;
-  const h = String(request.headers.get("authorization") || "");
-  if (!h.startsWith("Basic ")) return false;
-  let dec = ""; try { dec = atob(h.slice(6)); } catch { return false; }
-  return iguaisSeguro(dec.slice(dec.indexOf(":") + 1), senha);
+// Login do painel: página com senha (secret PAINEL_SENHA) e cookie de sessão de 30 dias.
+async function hmacHex(chave, texto) {
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(chave), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return Array.from(new Uint8Array(await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(texto))), b => b.toString(16).padStart(2, "0")).join("");
 }
-function negarPainel(env) {
-  const msg = String(env.PAINEL_SENHA || "").length < 12 ? "Painel bloqueado: crie o secret PAINEL_SENHA (mínimo 12 caracteres) no Cloudflare." : "Autenticação necessária.";
-  return new Response(msg, { status: 401, headers: { "WWW-Authenticate": 'Basic realm="DENIA", charset="UTF-8"', "content-type": "text/plain; charset=UTF-8" } });
+function senhaPainel(env) { const s = String(env.PAINEL_SENHA || ""); return s.length >= 8 ? s : ""; }
+async function painelAutorizado(request, env) {
+  const senha = senhaPainel(env);
+  if (!senha) return false;
+  const h = String(request.headers.get("authorization") || "");
+  if (h.startsWith("Basic ")) {
+    let dec = ""; try { dec = atob(h.slice(6)); } catch { return false; }
+    return iguaisSeguro(dec.slice(dec.indexOf(":") + 1), senha);
+  }
+  const m = String(request.headers.get("cookie") || "").match(/(?:^|;\s*)denia_sess=(\d+)\.([0-9a-f]{64})/);
+  if (!m || Number(m[1]) < Date.now()) return false;
+  return iguaisSeguro(m[2], await hmacHex(senha, "denia:" + m[1]));
+}
+function negarPainel(request) {
+  const url = new URL(request.url);
+  if (request.method === "GET" && !url.pathname.startsWith("/api/")) return new Response(null, { status: 302, headers: { location: "/login" } });
+  return json({ erro: "Faça login em /login." }, 401);
+}
+function paginaLogin(env, erro = "") {
+  const semSenha = !senhaPainel(env);
+  return cabecalho("DENIA — Entrar") + `<div class="card" style="max-width:420px;margin:40px auto"><b>Entrar no painel da DENIA</b><br><br>
+${semSenha ? `<small>O painel ainda não tem senha. Na Cloudflare: <b>Workers &amp; Pages → este Worker → Settings → Variables and Secrets → Add</b>, tipo <b>Secret</b>, nome <b>PAINEL_SENHA</b>, valor = a senha que você quiser (mínimo 8 caracteres). Salve, faça Deploy e volte aqui.</small>` :
+`<form method="post" action="/login"><input type="password" name="senha" placeholder="Senha do painel (PAINEL_SENHA)" autofocus required><br><br><button type="submit">Entrar</button></form>${erro ? `<p style="color:#b91c1c">${esc(erro)}</p>` : ""}`}</div></main></body></html>`;
+}
+async function login(request, env) {
+  if (request.method !== "POST") return paginaHTML(paginaLogin(env));
+  const senha = senhaPainel(env);
+  const form = await request.formData().catch(() => null);
+  if (!senha || !iguaisSeguro(String(form?.get("senha") || ""), senha)) return paginaHTML(paginaLogin(env, "Senha incorreta."), 401);
+  const exp = Date.now() + 30 * 86400000;
+  const cookie = `denia_sess=${exp}.${await hmacHex(senha, "denia:" + exp)}; Path=/; Max-Age=${30 * 86400}; HttpOnly; Secure; SameSite=Strict`;
+  return new Response(null, { status: 302, headers: { location: "/chat", "set-cookie": cookie } });
 }
 
 const CSS = `*{box-sizing:border-box}body{margin:0;font-family:system-ui,Arial,sans-serif;background:#f4f6f8;color:#111827}
@@ -1915,7 +2112,7 @@ button{background:#111827;color:#fff;border:0;border-radius:8px;padding:10px 14p
 #log{height:460px;overflow:auto;background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px}.b{max-width:85%;padding:9px 11px;border-radius:10px;margin:7px 0;white-space:pre-wrap;font-size:14px}
 .eu{margin-left:auto;background:#111827;color:#fff}.cli{background:#fff;border:1px solid #e5e7eb}.pre{background:#ecfdf5;border:1px solid #a7f3d0}.tel{background:#fff7ed;border:1px solid #fed7aa}
 .rot{font-size:11px;opacity:.7;display:block;margin-bottom:3px}.linha{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.linha>*{flex:1}small{color:#6b7280}`;
-function cabecalho(t) { return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${t}</title><style>${CSS}</style></head><body><header><b>DENIA ${VERSAO}</b><a href="/chat">Testar</a><a href="/treinar">Treinar IA</a><a href="/api/saude">Saúde</a></header><main>`; }
+function cabecalho(t) { return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${t}</title><style>${CSS}</style></head><body><header><b>DENIA ${VERSAO}</b><a href="/chat">Testar</a><a href="/treinar">Treinar IA</a><a href="/api/saude">Saúde</a><a href="/sair">Sair</a></header><main>`; }
 
 function paginaTeste() {
   const opcoes = PRESTADORES.map(p => `<option value="${esc(p.id)}">Prestador: ${esc(p.nome)} — ${esc(CATEGORIAS[p.area].rotulo.split(" (")[0])}</option>`).join("");
@@ -2009,7 +2206,9 @@ async function rotear(request, env, ctx) {
   if (caminho.startsWith("/platform/")) return platformApi(request, env, caminho, metodo);
   if (caminho === "/favicon.ico") return new Response(null, { status: 204 });
 
-  if (!painelAutorizado(request, env)) return negarPainel(env);
+  if (caminho === "/login") return login(request, env);
+  if (caminho === "/sair") return new Response(null, { status: 302, headers: { location: "/login", "set-cookie": "denia_sess=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict" } });
+  if (!(await painelAutorizado(request, env))) return negarPainel(request);
   const c = criarContexto(env);
   if (caminho === "/" || caminho === "/chat") return paginaHTML(paginaTeste());
   if (caminho === "/treinar") return paginaHTML(paginaTreinar());

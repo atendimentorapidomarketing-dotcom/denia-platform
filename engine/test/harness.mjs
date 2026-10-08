@@ -36,7 +36,7 @@ export async function criarAmbiente({ inicio = "2026-10-07T14:00:00-03:00", env:
   const worker = mod.default;
   const amb = {
     agora: Date.parse(inicio), DB: new D1Fake(), KV: null,
-    enviados: [], telegram: [], llm: [], llmCliente: null, llmPrestador: null, metaFalha: null, contador: 0, transcricoes: {}
+    enviados: [], telegram: [], llm: [], plataforma: [], crmConsultas: [], crmResposta: null, llmCliente: null, llmPrestador: null, metaFalha: null, contador: 0, transcricoes: {}
   };
   amb.KV = new KVFake(() => amb.agora);
   amb.env = {
@@ -68,6 +68,8 @@ export async function criarAmbiente({ inicio = "2026-10-07T14:00:00-03:00", env:
       if (out instanceof Error) return resp({ error: { message: out.message } }, 500);
       return resp({ output: [{ content: [{ type: "output_text", text: JSON.stringify(out) }] }] });
     }
+    if (url.startsWith("https://plataforma.test/")) { amb.plataforma.push({ headers: op.headers, corpo }); return resp({ ok: true, cliente_id: 77, os_id: 88 }); }
+    if (url.startsWith("https://crm.test/")) { amb.crmConsultas.push(url); return resp(amb.crmResposta || {}); }
     if (url.includes("api.telegram.org")) { amb.telegram.push(corpo.text); return resp({ ok: true, result: { message_id: 1 } }); }
     throw new Error("fetch inesperado: " + url);
   };
