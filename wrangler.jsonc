@@ -1,15 +1,19 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "denia-platform",
-  "compatibility_date": "2026-10-04",
-  "compatibility_flags": ["nodejs_compat"],
-  "main": "./worker/index.ts",
-  "preview_urls": true,
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-01",
   "assets": {
-    "not_found_handling": "none",
-    "binding": "ASSETS"
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "not_found_handling": "404-page",
+    "html_handling": "drop-trailing-slash"
   },
-  "observability": {
-    "enabled": true
-  }
+  // Banco da plataforma (empresas, usuários, permissões, auditoria).
+  // Na primeira publicação a Cloudflare cria o banco sozinha.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "denia-platform" }
+  ],
+  "observability": { "enabled": true }
 }

@@ -576,3 +576,16 @@ test("V30.3 — importação do cadastro de clientes: telefone normalizado e fic
   await a.cliente(CLI, "Oi");
   assert.equal(a.ultimoPara(CLI), "Oi, Joana!");
 });
+
+test("V30.3 — pausa geral pela plataforma", async () => {
+  const a = await criarAmbiente({ env: { DENIA_PLATFORM_SERVICE_TOKEN: SERVICO } });
+  const r = await (await api(a, "/platform/pause", { method: "POST", body: JSON.stringify({ ativa: true, autor: "Dono" }) })).json();
+  assert.equal(r.pausa_geral, true);
+  a.llmCliente = () => decisao({ resposta: "Oi!" });
+  await a.cliente(CLI, "Oi");
+  assert.equal(a.para(CLI).length, 0, "pausada não envia nada");
+  await api(a, "/platform/pause", { method: "POST", body: JSON.stringify({ ativa: false }) });
+  a.avancar(30000);
+  await a.cliente(CLI, "Oi?");
+  assert.ok(a.para(CLI).length >= 1);
+});

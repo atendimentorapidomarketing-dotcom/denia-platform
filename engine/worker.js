@@ -2168,6 +2168,13 @@ async function platformApi(request, env, caminho, metodo) {
     const n = await c.db.prepare("SELECT COUNT(*) n, COUNT(DISTINCT telefone) t, MAX(importado_ms) u FROM d30_ficha").first();
     return json({ sucesso: true, registros: Number(n?.n || 0), clientes: Number(n?.t || 0), ultima_importacao_ms: n?.u || null });
   }
+  if (caminho === "/platform/pause" && metodo === "POST") {
+    const ativa = corpo?.ativa === true;
+    await c.db.prepare("INSERT OR REPLACE INTO d30_meta(chave,valor) VALUES('pausa_geral',?)").bind(ativa ? "1" : "0").run();
+    cachePausaGeral = { em: 0, valor: false };
+    await evento(c, null, "PAUSA_GERAL", `${ativa ? "ativada" : "desativada"} por ${txt(corpo?.autor, 120) || "platform"}`);
+    return json({ sucesso: true, pausa_geral: ativa });
+  }
   if (caminho === "/platform/professionals") return json({ sucesso: true, profissionais: PRESTADORES.map(p => ({ ...p, area_rotulo: CATEGORIAS[p.area]?.rotulo })) });
   return json({ sucesso: false, erro: "Rota não encontrada." }, 404);
 }

@@ -1,36 +1,16 @@
 {
   "name": "denia-platform",
-  "version": "0.3.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite dev",
-    "build": "vite build",
-    "preview": "vite preview",
+    "build": "node scripts/verificar.mjs",
+    "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "check": "vite build && wrangler deploy --dry-run"
-  },
-  "dependencies": {
-    "@clerk/nextjs": "latest",
-    "@vinext/cloudflare": "latest",
-    "framer-motion": "latest",
-    "lucide-react": "latest",
-    "next": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "react-server-dom-webpack": "latest",
-    "vinext": "latest",
-    "zod": "latest"
+    "test": "node --no-warnings --test test/*.test.mjs && npm --prefix engine test",
+    "check": "node scripts/verificar.mjs && wrangler deploy --dry-run"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.54.3",
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "@vitejs/plugin-react": "latest",
-    "@vitejs/plugin-rsc": "latest",
-    "typescript": "latest",
-    "vite": "^7.0.0",
-    "wrangler": "^4.136.1"
+    "wrangler": "4.148.0"
   }
 }

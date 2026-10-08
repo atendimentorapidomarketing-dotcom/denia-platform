@@ -11,7 +11,8 @@
 - Importação do cadastro de clientes exportado do sistema das atendentes (planilha/CSV), até
   500 linhas por envio. A ficha importada entra no contexto da conversa como dado oficial.
 - API para a DENIA Platform (token `DENIA_PLATFORM_SERVICE_TOKEN`): `/platform/learning`,
-  `/platform/learning/start`, `/platform/learning/suggestions`, `/platform/import/clients`.
+  `/platform/learning/start`, `/platform/learning/suggestions`, `/platform/import/clients` e
+  `/platform/pause` (pausa geral pelo painel).
   Com isso, o treinamento passa a ser feito pela plataforma.
 
 ## 30.2.1 — 2026-10-08

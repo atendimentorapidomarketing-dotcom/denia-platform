@@ -1,0 +1,14 @@
+{
+  "name": "DENIA — Centro de comando",
+  "short_name": "DENIA",
+  "description": "Centro de comando da operação digital com inteligência artificial.",
+  "lang": "pt-BR",
+  "start_url": "/app",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#04060c",
+  "theme_color": "#04060c",
+  "icons": [
+    { "src": "/assets/img/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
