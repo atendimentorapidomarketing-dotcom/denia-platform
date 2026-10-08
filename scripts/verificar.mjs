@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
-const obrigatorios = ["src/worker.js", "public/index.html", "public/app.html", "public/entrar.html", "public/404.html", "public/assets/js/app.js", "public/assets/js/site.js", "public/assets/js/entrar.js"];
+const obrigatorios = ["public/sw.js", "src/worker.js", "public/index.html", "public/app.html", "public/entrar.html", "public/404.html", "public/assets/js/app.js", "public/assets/js/site.js", "public/assets/js/entrar.js"];
 const faltando = obrigatorios.filter(f => !existsSync(f));
 if (faltando.length) { console.error("Arquivos faltando:", faltando.join(", ")); process.exit(1); }
 for (const f of ["src/worker.js", "public/assets/js/app.js", "public/assets/js/site.js", "public/assets/js/entrar.js"]) {

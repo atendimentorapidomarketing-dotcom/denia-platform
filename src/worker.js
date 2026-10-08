@@ -21,7 +21,7 @@
 // ============================================================================
 
 const VERSAO = "2.0.0";
-const SCHEMA = "2.0.0-a";
+const SCHEMA = "2.1.0-a";
 const COOKIE = "__Host-denia_sessao";
 const SESSAO_MS = 8 * 60 * 60 * 1000;
 const MAX_TENTATIVAS = 5;
@@ -107,7 +107,7 @@ function ipDe(request) { return request.headers.get("cf-connecting-ip") || "loca
 const DDL = [
   `CREATE TABLE IF NOT EXISTS plt_meta (chave TEXT PRIMARY KEY, valor TEXT)`,
   `CREATE TABLE IF NOT EXISTS plt_organizacoes (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, segmento TEXT, cor TEXT, status TEXT NOT NULL DEFAULT 'ATIVA', criado_ms INTEGER NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS plt_usuarios (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE, nome TEXT, senha_hash TEXT, senha_salt TEXT, senha_iter INTEGER, super_admin INTEGER NOT NULL DEFAULT 0, ativo INTEGER NOT NULL DEFAULT 1, trocar_senha INTEGER NOT NULL DEFAULT 0, sessao_versao INTEGER NOT NULL DEFAULT 1, criado_ms INTEGER NOT NULL, ultimo_acesso_ms INTEGER)`,
+  `CREATE TABLE IF NOT EXISTS plt_usuarios (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE, nome TEXT, senha_hash TEXT, senha_salt TEXT, senha_iter INTEGER, super_admin INTEGER NOT NULL DEFAULT 0, ativo INTEGER NOT NULL DEFAULT 1, trocar_senha INTEGER NOT NULL DEFAULT 0, sessao_versao INTEGER NOT NULL DEFAULT 1, origem TEXT, criado_ms INTEGER NOT NULL, ultimo_acesso_ms INTEGER)`,
   `CREATE TABLE IF NOT EXISTS plt_membros (org_id INTEGER NOT NULL, usuario_id INTEGER NOT NULL, papel TEXT NOT NULL, criado_ms INTEGER NOT NULL, PRIMARY KEY (org_id, usuario_id))`,
   `CREATE INDEX IF NOT EXISTS plt_idx_membros_usuario ON plt_membros(usuario_id)`,
   `CREATE TABLE IF NOT EXISTS plt_integracoes (org_id INTEGER PRIMARY KEY, engine_url TEXT, token_cifrado TEXT, atualizado_ms INTEGER, atualizado_por TEXT)`,
@@ -157,7 +157,23 @@ function senhaForte(s) {
   if (!/[A-Za-z]/.test(s) || !/\d/.test(s)) return "Use letras e números na senha.";
   return "";
 }
-function segredo(env) { const s = String(env.SESSION_SECRET || ""); return s.length >= 32 ? s : ""; }
+// Chave das sessões: o secret SESSION_SECRET, se existir; senão uma chave aleatória criada
+// na primeira vez e guardada no banco da plataforma (assim nada precisa ser configurado).
+let segredoCache = "";
+async function segredo(env) {
+  const s = String(env.SESSION_SECRET || "");
+  if (s.length >= 32) return s;
+  if (segredoCache) return segredoCache;
+  await garantirSchema(env);
+  let r = await env.DB.prepare("SELECT valor FROM plt_meta WHERE chave='segredo'").first();
+  if (!r?.valor) {
+    const novo = b64url(crypto.getRandomValues(new Uint8Array(48)));
+    await env.DB.prepare("INSERT OR IGNORE INTO plt_meta(chave,valor) VALUES('segredo',?)").bind(novo).run();
+    r = await env.DB.prepare("SELECT valor FROM plt_meta WHERE chave='segredo'").first();
+  }
+  segredoCache = r.valor;
+  return segredoCache;
+}
 function configAdmin(env) {
   const email = normEmail(env.PLATFORM_ADMIN_EMAIL);
   const senha = String(env.PLATFORM_ADMIN_PASSWORD || "");
@@ -165,25 +181,25 @@ function configAdmin(env) {
 }
 async function criarCookie(env, usuario) {
   const dados = b64url(enc.encode(JSON.stringify({ u: usuario.id, sv: usuario.sessao_versao, exp: agora(env) + SESSAO_MS, v: 2 })));
-  return `${dados}.${await hmac(segredo(env), dados)}`;
+  return `${dados}.${await hmac(await segredo(env), dados)}`;
 }
 function cookieSessao(valor, maxAge) { return `${COOKIE}=${valor}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`; }
 async function lerSessao(request, env) {
-  if (!segredo(env)) return null;
+  const chave = await segredo(env);
   const m = String(request.headers.get("cookie") || "").match(new RegExp(`(?:^|;\\s*)${COOKIE}=([A-Za-z0-9_-]+)\\.([A-Za-z0-9_-]+)`));
-  if (!m || !iguaisSeguro(m[2], await hmac(segredo(env), m[1]))) return null;
+  if (!m || !iguaisSeguro(m[2], await hmac(chave, m[1]))) return null;
   let s;
   try { s = JSON.parse(new TextDecoder().decode(deB64url(m[1]))); } catch { return null; }
   if (!s || s.v !== 2 || !(Number(s.exp) > agora(env))) return null;
   await garantirSchema(env);
-  const u = await env.DB.prepare("SELECT id,email,nome,super_admin,ativo,trocar_senha,sessao_versao FROM plt_usuarios WHERE id=?").bind(Number(s.u)).first();
+  const u = await env.DB.prepare("SELECT id,email,nome,super_admin,ativo,trocar_senha,sessao_versao,origem,(senha_hash IS NOT NULL) tem_senha FROM plt_usuarios WHERE id=?").bind(Number(s.u)).first();
   if (!u || !u.ativo || u.sessao_versao !== s.sv) return null;
-  if (u.super_admin && configAdmin(env)?.email !== u.email) return null; // admin geral trocado ou removido da configuração
-  return { usuario: { ...u, super_admin: Boolean(u.super_admin), trocar_senha: Boolean(u.trocar_senha) }, exp: s.exp };
+  if (u.super_admin && u.origem === "ENV" && configAdmin(env)?.email !== u.email) return null; // admin geral trocado ou removido da configuração
+  return { usuario: { ...u, super_admin: Boolean(u.super_admin), trocar_senha: Boolean(u.trocar_senha), tem_senha: Boolean(u.tem_senha) }, exp: s.exp };
 }
 
 async function chaveCifra(env) {
-  const base = await crypto.subtle.importKey("raw", enc.encode(segredo(env)), "HKDF", false, ["deriveKey"]);
+  const base = await crypto.subtle.importKey("raw", enc.encode(await segredo(env)), "HKDF", false, ["deriveKey"]);
   return crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: enc.encode("denia-platform"), info: enc.encode("token-engine-v1") }, base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 }
 async function cifrar(env, texto) {
@@ -232,7 +248,6 @@ async function registrarFalha(env, chaves) {
 
 async function entrar(request, env) {
   if (!postLegitimo(request)) return json({ erro: "Requisição não autorizada." }, 403);
-  if (!segredo(env)) return json({ erro: "A plataforma ainda não foi configurada: defina o secret SESSION_SECRET (mínimo 32 caracteres) na Cloudflare.", codigo: "SEM_CONFIGURACAO" }, 503);
   const { corpo, erro } = await lerCorpo(request, 4000);
   if (erro) return erro;
   const email = normEmail(corpo.email), senha = String(corpo.senha || "").slice(0, 200);
@@ -245,7 +260,7 @@ async function entrar(request, env) {
     if (iguaisSeguro(senha, admin.senha)) {
       usuario = await env.DB.prepare("SELECT * FROM plt_usuarios WHERE email=?").bind(email).first();
       if (!usuario) {
-        usuario = await env.DB.prepare("INSERT INTO plt_usuarios(email,nome,super_admin,ativo,criado_ms) VALUES(?,?,1,1,?) RETURNING *").bind(email, "Administrador", agora(env)).first();
+        usuario = await env.DB.prepare("INSERT INTO plt_usuarios(email,nome,super_admin,ativo,origem,criado_ms) VALUES(?,?,1,1,'ENV',?) RETURNING *").bind(email, "Administrador", agora(env)).first();
       } else if (!usuario.super_admin || !usuario.ativo) {
         await env.DB.prepare("UPDATE plt_usuarios SET super_admin=1, ativo=1, trocar_senha=0 WHERE id=?").bind(usuario.id).run();
         usuario = { ...usuario, super_admin: 1, ativo: 1, trocar_senha: 0 };
@@ -253,11 +268,11 @@ async function entrar(request, env) {
     }
   } else if (emailValido(email)) {
     const u = await env.DB.prepare("SELECT * FROM plt_usuarios WHERE email=?").bind(email).first();
-    if (u && u.ativo && u.senha_hash && !u.super_admin) {
+    if (u && u.ativo && u.senha_hash) {
       const h = await hashSenha(senha, u.senha_salt, u.senha_iter || PBKDF2_ITER);
       if (iguaisSeguro(h.hash, u.senha_hash)) usuario = u;
-    } else {
-      await hashSenha(senha, null, PBKDF2_ITER); // mesmo tempo de resposta quando o e-mail não existe
+    } else if (!u) {
+      usuario = await loginLegado(env, email, senha);
     }
   }
   if (!usuario) {
@@ -274,6 +289,35 @@ async function entrar(request, env) {
   return json({ ok: true, trocar_senha: Boolean(usuario.trocar_senha) }, 200, { "set-cookie": cookieSessao(await criarCookie(env, usuario), SESSAO_MS / 1000) });
 }
 
+// Contas da versão anterior do site (tabela "users"): o mesmo e-mail e a mesma senha
+// continuam valendo. No primeiro acesso, a conta passa para o formato novo.
+async function loginLegado(env, email, senha) {
+  const tem = await env.DB.prepare("SELECT 1 ok FROM sqlite_master WHERE type='table' AND name='users'").first().catch(() => null);
+  if (!tem) { await hashSenha(senha, null, PBKDF2_ITER); return null; }
+  const l = await env.DB.prepare("SELECT * FROM users WHERE lower(email)=?").bind(email).first().catch(() => null);
+  if (!l?.password_salt || !l?.password_hash) { await hashSenha(senha, null, PBKDF2_ITER); return null; }
+  const k = await crypto.subtle.importKey("raw", enc.encode(senha), "PBKDF2", false, ["deriveBits"]);
+  const salt = Uint8Array.from(String(l.password_salt).match(/.{1,2}/g) || [], x => parseInt(x, 16));
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 30000 }, k, 256);
+  const hex = Array.from(new Uint8Array(bits), b => b.toString(16).padStart(2, "0")).join("");
+  if (!iguaisSeguro(hex, String(l.password_hash).toLowerCase())) return null;
+  const papel = String(l.role || "").toUpperCase();
+  const h = await hashSenha(senha, null, PBKDF2_ITER);
+  const u = await env.DB.prepare("INSERT INTO plt_usuarios(email,nome,senha_hash,senha_salt,senha_iter,super_admin,ativo,origem,criado_ms) VALUES(?,?,?,?,?,?,1,'LEGADO',?) RETURNING *")
+    .bind(email, txt(l.name, 120) || null, h.hash, h.salt, h.iter, papel === "SUPER_ADMIN" ? 1 : 0, agora(env)).first();
+  if (papel !== "SUPER_ADMIN") {
+    const nomeOrg = (await env.DB.prepare("SELECT name FROM organizations WHERE id=?").bind(l.organization_id).first().catch(() => null))?.name || "Minha empresa";
+    let o = await env.DB.prepare("SELECT id FROM plt_organizacoes WHERE lower(nome)=lower(?)").bind(nomeOrg).first();
+    if (!o) {
+      let sl = slug(nomeOrg), n = 1;
+      while (await env.DB.prepare("SELECT 1 FROM plt_organizacoes WHERE slug=?").bind(sl).first()) sl = `${slug(nomeOrg)}-${++n}`;
+      o = await env.DB.prepare("INSERT INTO plt_organizacoes(nome,slug,cor,status,criado_ms) VALUES(?,?,'#4f8cff','ATIVA',?) RETURNING id").bind(txt(nomeOrg, 120), sl, agora(env)).first();
+    }
+    await env.DB.prepare("INSERT OR IGNORE INTO plt_membros(org_id,usuario_id,papel,criado_ms) VALUES(?,?,?,?)").bind(o.id, u.id, papel === "OWNER" ? "OWNER" : "ADMIN", agora(env)).run();
+  }
+  return u;
+}
+
 // ---------------------------------------------------------------------------
 // Empresas, equipe, integração e auditoria
 // ---------------------------------------------------------------------------
@@ -284,7 +328,8 @@ async function organizacoesDo(env, usuario) {
     : `SELECT o.*, m.papel, (SELECT 1 FROM plt_integracoes i WHERE i.org_id=o.id AND i.token_cifrado IS NOT NULL) conectada FROM plt_membros m JOIN plt_organizacoes o ON o.id=m.org_id WHERE m.usuario_id=? AND o.status='ATIVA' ORDER BY o.id`;
   const st = env.DB.prepare(sql);
   const r = await (usuario.super_admin ? st : st.bind(usuario.id)).all();
-  return (r?.results || []).map(o => ({ id: o.id, nome: o.nome, slug: o.slug, segmento: o.segmento || "", cor: o.cor || "#4f8cff", status: o.status, papel: o.papel, conectada: Boolean(o.conectada) }));
+  const primeira = conexaoCloudflare(env) ? await primeiraEmpresa(env) : 0;
+  return (r?.results || []).map(o => ({ id: o.id, nome: o.nome, slug: o.slug, segmento: o.segmento || "", cor: o.cor || "#4f8cff", status: o.status, papel: o.papel, conectada: Boolean(o.conectada) || o.id === primeira }));
 }
 async function papelNa(env, usuario, orgId) {
   if (usuario.super_admin) {
@@ -307,9 +352,23 @@ async function validarEngineUrl(env, valor) {
   }
   return { url: u.origin };
 }
+// A versão anterior do site guardava a conexão nas variáveis DENIA_ENGINE_URL e
+// DENIA_PLATFORM_SERVICE_TOKEN. Elas continuam valendo para a primeira empresa.
+function conexaoCloudflare(env) {
+  const token = String(env.DENIA_PLATFORM_SERVICE_TOKEN || env.DENIA_ENGINE_SERVICE_TOKEN || "");
+  let url = "";
+  try { const u = new URL(String(env.DENIA_ENGINE_URL || env.DENIA_ENGINE_BASE_URL || "").trim()); if (u.protocol === "https:") url = u.origin; } catch { url = ""; }
+  return url && token.length >= 16 ? { url, token } : null;
+}
+async function primeiraEmpresa(env) {
+  return Number((await env.DB.prepare("SELECT MIN(id) id FROM plt_organizacoes").first())?.id || 0);
+}
 async function conexaoDa(env, orgId) {
   const i = await env.DB.prepare("SELECT * FROM plt_integracoes WHERE org_id=?").bind(orgId).first();
-  if (!i?.engine_url || !i?.token_cifrado) return null;
+  if (!i?.engine_url || !i?.token_cifrado) {
+    const cf = conexaoCloudflare(env);
+    return cf && orgId === await primeiraEmpresa(env) ? cf : null;
+  }
   const token = await decifrar(env, i.token_cifrado);
   return token.length >= 16 ? { url: i.engine_url, token } : null;
 }
@@ -437,6 +496,8 @@ async function apiOrg(request, env, sessao, orgId, resto) {
 
   if (resto === "integracao" && metodo === "GET") {
     const i = await env.DB.prepare("SELECT engine_url, token_cifrado, atualizado_ms, atualizado_por FROM plt_integracoes WHERE org_id=?").bind(orgId).first();
+    const cf = !(i?.engine_url && i?.token_cifrado) && orgId === await primeiraEmpresa(env) ? conexaoCloudflare(env) : null;
+    if (cf) return json({ engine_url: cf.url, token_configurado: true, origem: "cloudflare", atualizado_ms: null, atualizado_por: null });
     return json({ engine_url: i?.engine_url || "", token_configurado: Boolean(i?.token_cifrado), atualizado_ms: i?.atualizado_ms || null, atualizado_por: pode(papel, "ADMIN") ? i?.atualizado_por || null : null });
   }
   if (resto === "integracao" && metodo === "POST") {
@@ -517,7 +578,7 @@ async function api(request, env, caminho) {
   const u = sessao.usuario;
 
   if (caminho === "/api/eu" && metodo === "GET") {
-    return json({ usuario: { id: u.id, email: u.email, nome: u.nome || "", super_admin: u.super_admin, trocar_senha: u.trocar_senha }, organizacoes: await organizacoesDo(env, u), sessao_expira_ms: sessao.exp, versao: VERSAO, papeis: NOME_PAPEL });
+    return json({ usuario: { id: u.id, email: u.email, nome: u.nome || "", super_admin: u.super_admin, trocar_senha: u.trocar_senha, tem_senha: u.tem_senha }, organizacoes: await organizacoesDo(env, u), sessao_expira_ms: sessao.exp, versao: VERSAO, papeis: NOME_PAPEL });
   }
   if (caminho === "/api/conta" && metodo === "POST") {
     const { corpo, erro } = await lerCorpo(request);
@@ -527,7 +588,7 @@ async function api(request, env, caminho) {
       return json({ ok: true });
     }
     if (corpo.acao === "senha") {
-      if (u.super_admin) return json({ erro: "A senha do administrador geral é o secret PLATFORM_ADMIN_PASSWORD, na Cloudflare." }, 400);
+      if (!u.tem_senha) return json({ erro: "A senha do administrador geral é o secret PLATFORM_ADMIN_PASSWORD, na Cloudflare." }, 400);
       const atual = await env.DB.prepare("SELECT senha_hash, senha_salt, senha_iter FROM plt_usuarios WHERE id=?").bind(u.id).first();
       const h = await hashSenha(String(corpo.atual || "").slice(0, 200), atual.senha_salt, atual.senha_iter || PBKDF2_ITER);
       if (!iguaisSeguro(h.hash, atual.senha_hash)) return json({ erro: "A senha atual não confere." }, 400);
@@ -558,12 +619,20 @@ async function api(request, env, caminho) {
 // Roteamento e cabeçalhos de segurança
 // ---------------------------------------------------------------------------
 
+// Endereços da versão anterior do site levam às páginas novas.
+const ANTIGOS = {
+  "/login": "/entrar", "/login-en": "/entrar", "/login-es": "/entrar",
+  "/cadastro": "/entrar", "/cadastro-en": "/entrar", "/cadastro-es": "/entrar",
+  "/index": "/", "/index-en": "/", "/index-es": "/", "/app-en": "/app", "/app-es": "/app"
+};
 async function rotear(request, env) {
   const url = new URL(request.url);
   const caminho = url.pathname;
   if (caminho.startsWith("/api/")) return api(request, env, caminho);
   if (!["GET", "HEAD"].includes(request.method)) return new Response("Método não permitido.", { status: 405 });
 
+  const antigo = ANTIGOS[caminho.replace(/\.html$/, "")];
+  if (antigo) return redirecionar(antigo);
   const ehPainel = caminho === "/app" || caminho === "/app.html" || caminho.startsWith("/app/");
   const sessao = ehPainel || caminho === "/entrar" || caminho === "/entrar.html" ? await lerSessao(request, env).catch(() => null) : null;
   if (ehPainel) {
