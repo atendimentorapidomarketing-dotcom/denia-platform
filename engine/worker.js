@@ -35,7 +35,7 @@
 //       relatório diário. Nunca inicia conversa nova por conta própria.
 // ============================================================================
 
-const VERSAO = "30.3.0";
+const VERSAO = "30.4.0";
 const SCHEMA_VERSAO = "30.3.0-a";
 const EMPRESA_ID = 1;
 const PHONE_ID_PADRAO = "473474732510163";
@@ -1225,14 +1225,15 @@ COMO O SISTEMA AGE: quando o serviço está claro e o cliente quer orçamento, v
 Responda SOMENTE com um objeto JSON neste formato:
 {"resposta":"","intencao":"CONVERSA","novo_pedido":false,"quer_orcamento_ou_atendimento":false,"pronto_para_profissional":false,"fatos":{"servico":"","categoria":"","problema":"","marca":"","modelo":"","bairro":"","cidade":"","endereco":"","preferencia_horario":"","nome":""},"categoria_confianca":"BAIXA","resposta_para_profissional":"","descricao_anexos":"","comprovante_pagamento":false,"precisa_humano":false,"motivo_humano":"","resumo_caso":""}
 
-intencao: CONVERSA | NOVO_PEDIDO | ACEITA_PROPOSTA | RECUSA_PROPOSTA | PEDE_OUTRO_HORARIO | PEDE_ALTERACAO | PEDE_CANCELAMENTO | PERGUNTA_STATUS | AGRADECIMENTO | FALAR_COM_HUMANO.
+intencao: CONVERSA | NOVO_PEDIDO | ACEITA_PROPOSTA | RECUSA_PROPOSTA | PEDE_OUTRO_HORARIO | PEDE_ALTERACAO | PERGUNTA_PARA_PROFISSIONAL | PEDE_CANCELAMENTO | PERGUNTA_STATUS | AGRADECIMENTO | FALAR_COM_HUMANO.
 - ACEITA_PROPOSTA/RECUSA_PROPOSTA/PEDE_OUTRO_HORARIO: só quando o cliente responde à proposta enviada (etapa AGUARDANDO_CLIENTE).
 - PEDE_ALTERACAO: pedido de mudança em atendimento já combinado (ex.: chegar mais tarde, mudar o dia).
+- PERGUNTA_PARA_PROFISSIONAL: o caso já tem PROFISSIONAL CONSULTADO e o cliente faz uma pergunta que só o profissional sabe responder (material incluso, garantia, tempo de serviço, como é feito, se faz algo a mais, valor de um item extra, detalhes técnicos) e a resposta NÃO está nos fatos, no histórico nem no treinamento. Junte TODAS as perguntas das mensagens novas em resposta_para_profissional, em uma frase objetiva. Na "resposta", diga só que vai confirmar com o profissional. A ponte cliente ↔ profissional continua enquanto o cliente tiver dúvidas.
 - novo_pedido=true somente se o cliente pede um serviço DIFERENTE do caso ativo.
 - fatos: apenas o que foi informado nas mensagens novas (ou correção); deixe "" o que não mudou.
 - categoria: uma das CATEGORIAS, escolhida seguindo o TREINAMENTO DA EMPRESA (o treinamento manda). Aparelho ou eletrodoméstico com defeito (inclusive queimado por ligar em 110/220 V) NUNCA é ELETRICA. categoria_confianca: ALTA só quando não há nenhuma dúvida; senão MEDIA ou BAIXA (o caso vai para a equipe, sem errar o profissional).
 - pronto_para_profissional: true quando já se sabe o que precisa ser feito e em qual item, o suficiente para um profissional dar valor e disponibilidade.
-- resposta_para_profissional: preencha quando houver PERGUNTA DO PROFISSIONAL PENDENTE e as mensagens novas a respondem, ou quando a intencao for PEDE_ALTERACAO; texto objetivo, sem dados pessoais.
+- resposta_para_profissional: preencha quando houver PERGUNTA DO PROFISSIONAL PENDENTE e as mensagens novas a respondem, ou quando a intencao for PEDE_ALTERACAO ou PERGUNTA_PARA_PROFISSIONAL; texto objetivo, sem dados pessoais.
 - descricao_anexos: descrição objetiva das imagens/documentos anexados (leia textos visíveis). Se for comprovante de pagamento, comprovante_pagamento=true (isso não confirma o pagamento).
 - resumo_caso: 1 ou 2 frases atualizadas sobre o caso ativo.`;
 
@@ -1289,7 +1290,7 @@ tipo:
 - PERGUNTA: precisa de uma informação do cliente (modelo, medidas, foto, bairro, endereço...). Escreva pergunta_para_cliente de forma educada e clara, como a central perguntaria ao cliente. Se a resposta estiver EXPLÍCITA nos FATOS DO CASO, escreva-a em resposta_conhecida.
 - PEDE_CONTEXTO: não sabe de qual cliente/serviço se trata ("que cliente?", "verificar o quê?").
 - CONFIRMA_AGENDAMENTO: confirma o atendimento/dia/horário combinado.
-- RESPONDE: responde a um PEDIDO PENDENTE do cliente, ou dá um aviso claro para o cliente sobre o atendimento (atraso, horário de chegada). Escreva mensagem_para_cliente em nome da central, educada, sem gírias, sem dados pessoais, sem inventar.
+- RESPONDE: responde a um PEDIDO PENDENTE ou PERGUNTA DO CLIENTE (ex.: "sim, o material está incluso"), ou dá um aviso claro para o cliente sobre o atendimento (atraso, horário de chegada). Escreva mensagem_para_cliente em nome da central, educada, sem gírias, sem dados pessoais, sem inventar.
 - COMENTARIO: qualquer outra coisa: comentário solto, exclamação, mensagem ambígua (ex.: "Eita, Niterói"). NA DÚVIDA, use COMENTARIO.
 Campos:
 - valor_centavos: SOMENTE se ele escreveu um valor em dinheiro NESTA mensagem (R$ 400 = 40000). Senão 0.
@@ -1302,7 +1303,7 @@ Campos:
 // ============================================================================
 
 function normalizarDecisaoCliente(o) {
-  const intencoes = ["CONVERSA", "NOVO_PEDIDO", "ACEITA_PROPOSTA", "RECUSA_PROPOSTA", "PEDE_OUTRO_HORARIO", "PEDE_ALTERACAO", "PEDE_CANCELAMENTO", "PERGUNTA_STATUS", "AGRADECIMENTO", "FALAR_COM_HUMANO"];
+  const intencoes = ["CONVERSA", "NOVO_PEDIDO", "ACEITA_PROPOSTA", "RECUSA_PROPOSTA", "PEDE_OUTRO_HORARIO", "PEDE_ALTERACAO", "PERGUNTA_PARA_PROFISSIONAL", "PEDE_CANCELAMENTO", "PERGUNTA_STATUS", "AGRADECIMENTO", "FALAR_COM_HUMANO"];
   const f = o?.fatos && typeof o.fatos === "object" ? o.fatos : {};
   const fatos = {};
   for (const k of ["servico", "categoria", "problema", "marca", "modelo", "bairro", "cidade", "endereco", "preferencia_horario", "nome"]) { const v = txt(f[k], 400); if (v) fatos[k] = v; }
@@ -1341,8 +1342,9 @@ async function processarCliente(c, tel, id, msgs, { apenasRegistrar, chaveLote }
   let { ativo: caso, recentes } = await carregarCasos(c, pessoa);
   const { anexos, falhas } = await prepararMidias(c, msgs);
 
-  // 1) Tudo que chega é registrado, mesmo quando a DENIA não vai responder.
-  for (const m of msgs) await registrarMensagem(c, { pessoaId: pessoa.id, casoId: caso?.casoId, wamid: m.wamid, direcao: "ENTRADA", origem: "WHATSAPP", tipo: String(m.tipo || "text").toUpperCase(), conteudo: m.conteudo });
+  // 1) Tudo que chega é registrado, mesmo quando a DENIA não vai responder (uma vez só, mesmo se o lote for refeito).
+  const jaRegistradas = new Set(((await c.db.prepare(`SELECT whatsapp_message_id w FROM mensagens WHERE whatsapp_message_id IN (${msgs.map(() => "?").join(",")})`).bind(...msgs.map(m => m.wamid)).all().catch(() => null))?.results || []).map(x => x.w));
+  for (const m of msgs) if (!jaRegistradas.has(m.wamid)) await registrarMensagem(c, { pessoaId: pessoa.id, casoId: caso?.casoId, wamid: m.wamid, direcao: "ENTRADA", origem: "WHATSAPP", tipo: String(m.tipo || "text").toUpperCase(), conteudo: m.conteudo });
 
   if (apenasRegistrar) {
     await alertarEquipe(c, `Mensagens de ${pessoa.nome || tel} chegaram com mais de 15 min de atraso e NÃO foram respondidas automaticamente. Verifique a conversa.`, "atraso:" + chaveLote, caso?.casoId);
@@ -1378,6 +1380,8 @@ async function processarCliente(c, tel, id, msgs, { apenasRegistrar, chaveLote }
     await alertarEquipe(c, `Falha da IA ao responder ${pessoa.nome || tel}: ${txt(e?.message, 200)}. Cliente recebeu "Um momento, por favor."`, "ia:" + chaveLote, caso?.casoId);
     return;
   }
+  // Chegou mensagem nova enquanto a IA pensava? Nada é feito agora: tudo será respondido junto.
+  if (!c.sim && await chegouMensagemNova(c, tel, msgs.map(m => ({ recebido_ms: m.recebidoMs })))) throw new Adiar();
   if (falhas.length) await alertarEquipe(c, `Mídia de ${pessoa.nome || tel} não pôde ser analisada (${falhas.join("; ")}). Verifique a conversa.`, "midia:" + chaveLote, caso?.casoId);
 
   // 3) Caso: criar quando surge um pedido; mesclar fatos (o mais recente vale).
@@ -1442,6 +1446,19 @@ async function decidirCliente(c, { tel, pessoa, caso, consulta, d, chaveLote }) 
     const r = await enviarAoPrestador(c, { consulta, caso, texto: `Caso #${caso.casoId} — resposta do cliente: ${d.resposta_para_profissional}`, chave: "resp:" + chaveLote });
     if (r.ok || r.agendado) { await atualizarConsulta(c, consulta.id, { pergunta_pendente: null }); return { texto: "Obrigado! Vamos repassar ao profissional.", fixa: true }; }
     await alertarEquipe(c, `Não foi possível repassar ao profissional a resposta do cliente (caso #${caso.casoId}): ${r.erro}`, "falha-resp:" + chaveLote, caso.casoId);
+    return { texto: "Um momento, por favor.", fixa: true };
+  }
+
+  // Ponte cliente → profissional: dúvida que só o profissional responde.
+  if (d.intencao === "PERGUNTA_PARA_PROFISSIONAL" && consulta && d.resposta_para_profissional && ETAPAS_COM_PRESTADOR.has(caso.etapa)) {
+    const pergunta = d.resposta_para_profissional;
+    const r = await enviarAoPrestador(c, { consulta, caso, texto: `Caso #${caso.casoId} — o cliente perguntou: ${pergunta}`, chave: "pergcli:" + chaveLote });
+    if (r.ok || r.agendado) {
+      const anterior = String(consulta.pedido_pendente || "").startsWith("PERGUNTA DO CLIENTE:") ? consulta.pedido_pendente + " / " : "PERGUNTA DO CLIENTE: ";
+      await atualizarConsulta(c, consulta.id, { pedido_pendente: txt(anterior + pergunta, 900) });
+      return { texto: r.agendado ? "Boa pergunta! Vou confirmar com o profissional a partir das 8h e te respondo." : "Boa pergunta! Vou confirmar com o profissional e já te respondo.", fixa: true };
+    }
+    await alertarEquipe(c, `Não consegui levar ao profissional a pergunta do cliente (caso #${caso.casoId}): "${txt(pergunta, 200)}". ${r.erro || ""}`, "falha-pergcli:" + chaveLote, caso.casoId);
     return { texto: "Um momento, por favor.", fixa: true };
   }
 
@@ -1608,7 +1625,7 @@ FATOS DO CASO:
 ${formatarFatos(caso.fatos)}
 ${consulta.valor_prestador ? `Valor já informado por ele: ${moeda(consulta.valor_prestador)} (final para o cliente: ${consulta.valor_final || "não informado"})` : ""}
 ${consulta.disponibilidade ? `Disponibilidade já informada: ${consulta.disponibilidade}` : ""}
-${consulta.pedido_pendente ? `PEDIDO PENDENTE DO CLIENTE: ${consulta.pedido_pendente}` : ""}
+${consulta.pedido_pendente ? `PEDIDO PENDENTE DO CLIENTE (responda a ele com RESPONDE e mensagem_para_cliente): ${consulta.pedido_pendente}` : ""}
 ÚLTIMA MENSAGEM QUE ENVIAMOS A ELE: ${ultimaNossa?.conteudo || "-"}
 
 HISTÓRICO DESTE CASO COM O PROFISSIONAL:
@@ -1777,8 +1794,23 @@ async function processarEco(c, eco) {
 // FILA, AGRUPAMENTO E LOTES
 // ============================================================================
 
-function janela(env) { const v = Number(env.JANELA_AGRUPAMENTO_MS ?? 8000); return Number.isFinite(v) ? Math.min(Math.max(v, 0), 15000) : 8000; }
+function janela(env) { const v = Number(env.JANELA_AGRUPAMENTO_MS ?? 15000); return Number.isFinite(v) ? Math.min(Math.max(v, 0), 20000) : 15000; }
+// Enquanto o cliente continua escrevendo, a DENIA espera e responde tudo de uma vez.
+// Só não espera para sempre: depois de 3 minutos do primeiro envio, responde.
+const ESPERA_MAXIMA_LOTE_MS = 180000;
+class Adiar extends Error { constructor() { super("ADIAR"); this.adiar = true; } }
+async function chegouMensagemNova(c, tel, itens) {
+  const primeira = Math.min(...itens.map(i => Number(i.recebido_ms) || c.agora()));
+  if (c.agora() - primeira > ESPERA_MAXIMA_LOTE_MS) return false;
+  const r = await c.db.prepare("SELECT 1 AS ok FROM d30_fila WHERE telefone=? AND status='PENDENTE' LIMIT 1").bind(tel).first().catch(() => null);
+  return Boolean(r?.ok);
+}
 
+async function esperarSilencio(c, tel) {
+  const ult = await c.db.prepare("SELECT MAX(recebido_ms) m FROM d30_fila WHERE telefone=? AND status='PENDENTE'").bind(tel).first().catch(() => null);
+  const falta = Number(ult?.m || 0) + janela(c.env) - c.agora();
+  if (falta > 0) await sleep(Math.min(falta, janela(c.env)));
+}
 async function agruparEProcessar(c, tel, wamid) {
   await sleep(janela(c.env));
   const ult = await c.db.prepare("SELECT wamid FROM d30_fila WHERE telefone=? AND status='PENDENTE' ORDER BY recebido_ms DESC, rowid DESC LIMIT 1").bind(tel).first();
@@ -1797,6 +1829,13 @@ async function processarPendentes(c, tel) {
     let status = "CONCLUIDO", erro = null;
     try { await processarLote(c, tel, itens); }
     catch (e) {
+      if (e?.adiar) {
+        // O cliente mandou mais mensagens enquanto a DENIA pensava: devolve tudo à fila e
+        // responde uma vez só, depois que ele parar de escrever.
+        await c.db.prepare("UPDATE d30_fila SET status='PENDENTE', lote=NULL, atualizado_ms=? WHERE lote=?").bind(c.agora(), lote).run();
+        await esperarSilencio(c, tel);
+        continue;
+      }
       status = "ERRO"; erro = txt(e?.stack || e?.message || e, 500);
       console.error("lote", tel, erro);
       await alertarEquipe(c, `Erro ao processar mensagens de ${tel}: ${txt(e?.message, 200)}. Verifique a conversa.`, "erro-lote:" + lote).catch(() => { });
@@ -1974,7 +2013,7 @@ async function contingencia(c, m, motivo = "") {
     const treino = await carregarTreinamento(c);
     const caso = snap ? { casoId: snap.casoId, etapa: snap.etapa, fatos: snap.fatos || {}, resumo: snap.resumo } : null;
     const d = normalizarDecisaoCliente(await openaiJSON(c, INSTRUCOES_CLIENTE, montarEntradaCliente({ agora: c.agora(), treinamento: treino, caso, consulta: null, autorizados: new Set(), recentes: [], hist: hist.slice(-24, -textos.length).map(x => `${x.a}: ${x.t}`).join("\n") || "(sem histórico disponível)", novas: textos.map(t => "- " + t).join("\n"), temAnexos: false, pessoa: { nome: m.nome } })));
-    const acaoNecessaria = ["ACEITA_PROPOSTA", "PEDE_CANCELAMENTO", "PEDE_ALTERACAO", "FALAR_COM_HUMANO", "PEDE_OUTRO_HORARIO"].includes(d.intencao) || (d.quer && d.pronto) || d.precisa_humano;
+    const acaoNecessaria = ["ACEITA_PROPOSTA", "PEDE_CANCELAMENTO", "PEDE_ALTERACAO", "PERGUNTA_PARA_PROFISSIONAL", "FALAR_COM_HUMANO", "PEDE_OUTRO_HORARIO"].includes(d.intencao) || (d.quer && d.pronto) || d.precisa_humano;
     const g = guardarResposta(d.resposta, { etapa: caso?.etapa || "SEM_CASO", autorizados: new Set(), modo: "", regiaoConfirmada: false, fatos: caso?.fatos || null, perguntadas: perguntasRecentes(histFormatoD1, 12) });
     resposta = acaoNecessaria ? "Recebemos sua mensagem. Um atendente vai dar continuidade em instantes." : g.texto;
   } catch (e) {

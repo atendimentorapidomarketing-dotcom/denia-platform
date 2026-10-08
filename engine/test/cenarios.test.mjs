@@ -589,3 +589,49 @@ test("V30.3 — pausa geral pela plataforma", async () => {
   await a.cliente(CLI, "Oi?");
   assert.ok(a.para(CLI).length >= 1);
 });
+
+test("V30.4 — ponte contínua: cada dúvida do cliente vai ao profissional e a resposta volta ao cliente", async () => {
+  const a = await criarAmbiente();
+  await iniciarConsultaChaveiro(a);
+  a.llmPrestador = () => prest({ tipo: "ACEITA", valor_centavos: 15000, valor_e_final: "SIM", disponibilidade: "amanhã às 10h" });
+  await a.cliente(CHAVEIRO, "Faço amanhã às 10h, 150 já é o valor final");
+  assert.match(a.ultimoPara(CLI), /R\$ 150,00/);
+
+  a.llmCliente = () => decisao({ resposta: "Vou confirmar com o profissional.", intencao: "PERGUNTA_PARA_PROFISSIONAL", resposta_para_profissional: "A fechadura nova está inclusa no valor?" });
+  await a.cliente(CLI, "A fechadura nova está inclusa?");
+  assert.match(a.ultimoPara(CHAVEIRO), /Caso #\d+ — o cliente perguntou: A fechadura nova está inclusa no valor\?/);
+  assert.match(a.ultimoPara(CLI), /Vou confirmar com o profissional e já te respondo/);
+
+  a.llmPrestador = (e) => { assert.match(e, /PERGUNTA DO CLIENTE: A fechadura nova/); return prest({ tipo: "RESPONDE", mensagem_para_cliente: "Sim, a fechadura nova já está inclusa." }); };
+  await a.cliente(CHAVEIRO, "Sim, já inclui a fechadura");
+  assert.equal(a.ultimoPara(CLI), "Sim, a fechadura nova já está inclusa.");
+
+  a.llmCliente = () => decisao({ resposta: "Vou confirmar.", intencao: "PERGUNTA_PARA_PROFISSIONAL", resposta_para_profissional: "Tem garantia?" });
+  await a.cliente(CLI, "E tem garantia?");
+  assert.match(a.ultimoPara(CHAVEIRO), /o cliente perguntou: Tem garantia\?/, "a ponte continua enquanto houver dúvidas");
+  a.llmPrestador = () => prest({ tipo: "RESPONDE", mensagem_para_cliente: "Sim, são 90 dias de garantia." });
+  await a.cliente(CHAVEIRO, "90 dias");
+  assert.equal(a.ultimoPara(CLI), "Sim, são 90 dias de garantia.");
+});
+
+test("V30.4 — cliente manda várias mensagens enquanto a IA pensa: uma resposta só, com tudo", async () => {
+  const a = await criarAmbiente();
+  let chamadas = 0, entradas = [];
+  a.llmCliente = (e) => {
+    chamadas++; entradas.push(e);
+    if (chamadas === 1) {
+      // Chega outra mensagem do cliente durante o processamento.
+      for (const [i, t] of ["é na porta da cozinha", "e é urgente"].entries()) {
+        const w = "wamid.durante." + i;
+        a.DB.q("INSERT INTO d30_fila(wamid,telefone,payload,recebido_ms,status,atualizado_ms) VALUES(?,?,?,?,'PENDENTE',?) RETURNING wamid", w, CLI, JSON.stringify({ wamid: w, de: CLI, tipo: "text", texto: t, ts: Math.floor(a.agora / 1000), recebidoMs: a.agora }), a.agora, a.agora);
+      }
+    }
+    return decisao({ resposta: "Entendi! Vou ver isso para você." });
+  };
+  await a.cliente(CLI, "Oi, minha fechadura quebrou");
+  assert.equal(a.para(CLI).length, 1, "uma única resposta para as três mensagens");
+  assert.equal(chamadas, 2);
+  assert.match(entradas[1], /fechadura quebrou[\s\S]*porta da cozinha[\s\S]*urgente/, "a resposta considera todas as mensagens");
+  const registradas = a.DB.q("SELECT COUNT(*) n FROM mensagens WHERE direcao='ENTRADA'")[0].n;
+  assert.equal(registradas, 3, "cada mensagem registrada uma vez só");
+});
