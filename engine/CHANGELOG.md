@@ -1,5 +1,10 @@
 # Changelog — DENIA Engine
 
+## 30.2.1 — 2026-10-08
+
+- Senha do painel passa a ser opcional: sem o secret PAINEL_SENHA, `/chat`, `/treinar` e
+  `/api/saude` abrem direto, como na versão antiga.
+
 ## 30.2.0 — 2026-10-08
 
 ### Corrigido

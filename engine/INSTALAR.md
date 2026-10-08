@@ -21,7 +21,7 @@ Worker → **Settings → Variables and Secrets**. Mantenha os que já existem
 
 | Nome | Obrigatório? | O que é |
 |---|---|---|
-| `PAINEL_SENHA` | **Sim** | Senha do painel (mínimo 8 caracteres). Você entra em `https://SEU-WORKER.workers.dev/login`, digita essa senha e fica conectado por 30 dias. |
+| `PAINEL_SENHA` | Opcional | Sem ele, as páginas `/chat`, `/treinar` e `/api/saude` abrem direto, como na versão antiga. Se quiser proteger, crie com no mínimo 8 caracteres e entre por `/login`. (Isso não tem relação com o editor de código da Cloudflare.) |
 | `META_APP_SECRET` | Recomendado | "Chave secreta do app" (Meta for Developers → seu app → Configurações → Básico). Impede que alguém forje mensagens no webhook. |
 | `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID` | Recomendado | Alertas para a equipe e o aviso de "SERVIÇO AGENDADO". Sem eles, os alertas só aparecem no log. |
 | `WHATSAPP_TEMPLATE_CONSULTA_TECNICO` | Recomendado | Nome de um template aprovado pela Meta para falar com prestador que não escreveu nas últimas 24 h (ver Passo 7). |
@@ -54,11 +54,9 @@ em dobro e o cron antigo continua consumindo a cota do D1.
 1. **Edit code** → apague todo o conteúdo → cole o conteúdo de `engine/worker.js`.
 2. **Deploy**.
 
-## Passo 5 — Entrar e conferir a saúde (1 min)
+## Passo 5 — Conferir a saúde (1 min)
 
-Abra `https://SEU-WORKER.workers.dev/login` e digite a senha que você colocou em `PAINEL_SENHA`.
-Se a página disser que o painel ainda não tem senha, falta criar o secret `PAINEL_SENHA` (Passo 2).
-Depois abra `https://SEU-WORKER.workers.dev/api/saude`.
+Abra `https://SEU-WORKER.workers.dev/api/saude` (se você criou `PAINEL_SENHA`, entre antes por `/login`).
 
 Precisa aparecer `"ok": true` e `"d1": { "operacional": true }`. Os outros campos mostram
 o que ainda falta configurar (Telegram, template, assinatura da Meta).

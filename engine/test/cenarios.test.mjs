@@ -485,8 +485,8 @@ test("V30.2 — login: página com senha e cookie de sessão", async () => {
   const cookie = ok.headers.get("set-cookie").split(";")[0];
   const dentro = await a.worker.fetch(new Request("https://denia.test/chat", { headers: { cookie } }), a.env, { waitUntil() { } });
   assert.equal(dentro.status, 200);
-  const semSegredo = await a.worker.fetch(new Request("https://denia.test/login"), { ...a.env, PAINEL_SENHA: "" }, { waitUntil() { } });
-  assert.match(await semSegredo.text(), /PAINEL_SENHA/);
+  const aberto = await a.worker.fetch(new Request("https://denia.test/chat"), { ...a.env, PAINEL_SENHA: "" }, { waitUntil() { } });
+  assert.equal(aberto.status, 200, "sem PAINEL_SENHA o painel abre direto");
 });
 
 test("V30.2 — casos e clientes sincronizam com a plataforma de cadastro, com confirmação", async () => {

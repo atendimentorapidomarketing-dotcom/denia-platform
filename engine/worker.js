@@ -35,7 +35,7 @@
 //       relatório diário. Nunca inicia conversa nova por conta própria.
 // ============================================================================
 
-const VERSAO = "30.2.0";
+const VERSAO = "30.2.1";
 const SCHEMA_VERSAO = "30.2.0-a";
 const EMPRESA_ID = 1;
 const PHONE_ID_PADRAO = "473474732510163";
@@ -2073,7 +2073,7 @@ async function hmacHex(chave, texto) {
 function senhaPainel(env) { const s = String(env.PAINEL_SENHA || ""); return s.length >= 8 ? s : ""; }
 async function painelAutorizado(request, env) {
   const senha = senhaPainel(env);
-  if (!senha) return false;
+  if (!senha) return true; // sem PAINEL_SENHA o painel fica aberto (como na versão antiga)
   const h = String(request.headers.get("authorization") || "");
   if (h.startsWith("Basic ")) {
     let dec = ""; try { dec = atob(h.slice(6)); } catch { return false; }
@@ -2095,6 +2095,7 @@ ${semSenha ? `<small>O painel ainda não tem senha. Na Cloudflare: <b>Workers &a
 `<form method="post" action="/login"><input type="password" name="senha" placeholder="Senha do painel (PAINEL_SENHA)" autofocus required><br><br><button type="submit">Entrar</button></form>${erro ? `<p style="color:#b91c1c">${esc(erro)}</p>` : ""}`}</div></main></body></html>`;
 }
 async function login(request, env) {
+  if (!senhaPainel(env)) return new Response(null, { status: 302, headers: { location: "/chat" } });
   if (request.method !== "POST") return paginaHTML(paginaLogin(env));
   const senha = senhaPainel(env);
   const form = await request.formData().catch(() => null);
@@ -2112,7 +2113,7 @@ button{background:#111827;color:#fff;border:0;border-radius:8px;padding:10px 14p
 #log{height:460px;overflow:auto;background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px}.b{max-width:85%;padding:9px 11px;border-radius:10px;margin:7px 0;white-space:pre-wrap;font-size:14px}
 .eu{margin-left:auto;background:#111827;color:#fff}.cli{background:#fff;border:1px solid #e5e7eb}.pre{background:#ecfdf5;border:1px solid #a7f3d0}.tel{background:#fff7ed;border:1px solid #fed7aa}
 .rot{font-size:11px;opacity:.7;display:block;margin-bottom:3px}.linha{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.linha>*{flex:1}small{color:#6b7280}`;
-function cabecalho(t) { return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${t}</title><style>${CSS}</style></head><body><header><b>DENIA ${VERSAO}</b><a href="/chat">Testar</a><a href="/treinar">Treinar IA</a><a href="/api/saude">Saúde</a><a href="/sair">Sair</a></header><main>`; }
+function cabecalho(t) { return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${t}</title><style>${CSS}</style></head><body><header><b>DENIA ${VERSAO}</b><a href="/chat">Testar</a><a href="/treinar">Treinar IA</a><a href="/api/saude">Saúde</a></header><main>`; }
 
 function paginaTeste() {
   const opcoes = PRESTADORES.map(p => `<option value="${esc(p.id)}">Prestador: ${esc(p.nome)} — ${esc(CATEGORIAS[p.area].rotulo.split(" (")[0])}</option>`).join("");
